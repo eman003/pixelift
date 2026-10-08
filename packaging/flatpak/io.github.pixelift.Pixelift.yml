@@ -1,0 +1,40 @@
+# Flatpak manifest (local builds). PyTorch wheels are fetched with pip during the
+# build, which needs network access:
+#   flatpak-builder --user --install --force-clean \
+#       --build-args=--share=network build/flatpak \
+#       packaging/flatpak/io.github.pixelift.Pixelift.yml
+# For Flathub, replace the pip step with generated sources (flatpak-pip-generator).
+id: io.github.pixelift.Pixelift
+runtime: org.gnome.Platform
+runtime-version: "47"
+sdk: org.gnome.Sdk
+command: pixelift
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri          # GPU access (CUDA/ROCm need the matching driver extensions)
+  - --share=network       # only used to download AI models on request
+  - --filesystem=home     # read source images / write upscaled results
+modules:
+  - name: python-deps
+    buildsystem: simple
+    build-options:
+      build-args: [--share=network]
+    build-commands:
+      - pip3 install --prefix=/app --no-cache-dir
+          --index-url https://download.pytorch.org/whl/cpu
+          --extra-index-url https://pypi.org/simple torch numpy pillow
+  - name: pixelift
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps --no-build-isolation .
+      - install -Dm644 packaging/io.github.pixelift.Pixelift.desktop
+          /app/share/applications/io.github.pixelift.Pixelift.desktop
+      - install -Dm644 pixelift/data/icons/hicolor/scalable/apps/io.github.pixelift.Pixelift.svg
+          /app/share/icons/hicolor/scalable/apps/io.github.pixelift.Pixelift.svg
+      - install -Dm644 packaging/io.github.pixelift.Pixelift.metainfo.xml
+          /app/share/metainfo/io.github.pixelift.Pixelift.metainfo.xml
+    sources:
+      - type: dir
+        path: ../..

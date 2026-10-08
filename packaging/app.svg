@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6d4dff"/>
+      <stop offset="0.55" stop-color="#3f25c9"/>
+      <stop offset="1" stop-color="#1d1060"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.22" r="0.55">
+      <stop offset="0" stop-color="#8ff3ff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#8ff3ff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sweep" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffb347"/>
+      <stop offset="0.5" stop-color="#ffe7a8"/>
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <clipPath id="clip"><rect x="8" y="8" width="112" height="112" rx="26"/></clipPath>
+  </defs>
+
+  <!-- tile with soft base shadow -->
+  <rect x="8" y="12" width="112" height="112" rx="26" fill="#120a3d" opacity="0.35"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#tile)"/>
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#glow)"/>
+  <rect x="8.5" y="8.5" width="111" height="111" rx="25.5" fill="none" stroke="#ffffff" stroke-opacity="0.18"/>
+
+  <g clip-path="url(#clip)">
+    <!-- chunky low-res pixels climbing a staircase -->
+    <rect x="20" y="88" width="16" height="16" rx="2.5" fill="#ff5f7e"/>
+    <rect x="38" y="88" width="16" height="16" rx="2.5" fill="#ff7a5c"/>
+    <rect x="38" y="70" width="16" height="16" rx="2.5" fill="#ff8f4d"/>
+    <rect x="56" y="74" width="11" height="11" rx="2" fill="#ffa94a"/>
+    <rect x="56" y="61" width="11" height="11" rx="2" fill="#ffbf55" opacity="0.95"/>
+    <rect x="69" y="58" width="7" height="7" rx="1.5" fill="#ffd36e" opacity="0.9"/>
+
+    <!-- pixels become a smooth sweep: the "lift" -->
+    <path d="M60 86 C 74 80, 86 64, 98 34" fill="none" stroke="url(#sweep)"
+          stroke-width="9" stroke-linecap="round"/>
+  </g>
+
+  <!-- sparkle of recovered detail -->
+  <path d="M99 14 L102.6 25.4 L114 29 L102.6 32.6 L99 44 L95.4 32.6 L84 29 L95.4 25.4 Z"
+        fill="#ffffff"/>
+  <circle cx="113" cy="47" r="2.6" fill="#ffffff" opacity="0.85"/>
+</svg>

@@ -1,0 +1,37 @@
+.drop-zone:drop(active) {
+  outline: 3px dashed alpha(@accent_color, 0.8);
+  outline-offset: -12px;
+  border-radius: 18px;
+  background-color: alpha(@accent_bg_color, 0.08);
+}
+
+.thumbnail {
+  border-radius: 8px;
+  background-color: alpha(currentColor, 0.06);
+}
+
+.queue-row {
+  padding: 8px 10px;
+}
+
+.status-done { color: @success_color; }
+.status-failed { color: @error_color; }
+.status-skipped { color: alpha(currentColor, 0.6); }
+.status-processing { color: @accent_color; }
+
+.control-panel {
+  padding: 12px 18px 18px 18px;
+}
+
+.compare-view {
+  background-color: #1e1e1e;
+}
+
+.osd-pill {
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+
+.privacy-note {
+  font-size: smaller;
+}

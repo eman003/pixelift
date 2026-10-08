@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Pixelift
+GenericName=AI Pixelift
+Comment=Make images larger and sharper with AI — locally on your computer
+Exec=pixelift --gui %F
+Icon=io.github.pixelift.Pixelift
+Terminal=false
+Categories=Graphics;RasterGraphics;GTK;
+Keywords=upscale;upscaler;super-resolution;enlarge;resize;ai;esrgan;photo;
+MimeType=image/png;image/jpeg;image/webp;image/tiff;image/bmp;
+StartupNotify=true
+StartupWMClass=io.github.pixelift.Pixelift

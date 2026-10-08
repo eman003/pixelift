@@ -1,0 +1,35 @@
+MIT License
+
+Copyright (c) 2026 Pixelift contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+Third-party notices
+
+pixelift/models/archs.py re-implements the RRDBNet and SRVGGNetCompact
+network architectures from Real-ESRGAN / BasicSR:
+
+  BSD 3-Clause License
+  Copyright (c) 2021, Xintao Wang. All rights reserved.
+  https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE
+
+The Real-ESRGAN model weights are NOT distributed with this software. They are
+downloaded on request from the official Real-ESRGAN GitHub releases and are
+covered by the same BSD 3-Clause license.

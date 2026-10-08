@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelift"
+dynamic = ["version"]
+description = "Pixelift — local AI image upscaler for the Linux desktop (Real-ESRGAN, GTK4/libadwaita)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+authors = [{ name = "Pixelift contributors" }]
+keywords = ["upscaling", "super-resolution", "real-esrgan", "gtk4", "ubuntu"]
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: X11 Applications :: GTK",
+  "Topic :: Multimedia :: Graphics",
+]
+dependencies = [
+  "torch>=2.2",
+  "numpy>=1.26",
+  "pillow>=10.2",
+  # PyGObject (GTK4 + libadwaita bindings) is taken from the system on Ubuntu:
+  #   sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
+  # Create the venv with --system-site-packages, or `pip install .[gui]`.
+]
+
+[project.optional-dependencies]
+gui = ["PyGObject>=3.46"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+pixelift = "pixelift.main:main"
+image-upscaler = "pixelift.main:main"
+
+[project.gui-scripts]
+pixelift-gui = "pixelift.main:gui_main"
+
+[tool.setuptools.dynamic]
+version = { attr = "pixelift.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["pixelift*"]
+
+[tool.setuptools.package-data]
+pixelift = ["ui/*.css", "data/*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "BLE", "ANN", "RUF"]
+ignore = ["ANN401", "RUF001", "RUF002", "RUF003", "SIM105"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "N802"]
+"scripts/*" = ["ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+markers = [
+  "gpu: needs a CUDA/ROCm/XPU device (skipped automatically otherwise)",
+  "models: needs real downloaded model weights (skipped automatically otherwise)",
+  "gui: needs GTK4/libadwaita and a display",
+]

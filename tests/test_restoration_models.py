@@ -150,3 +150,28 @@ def test_full_restoration_with_upscaling(tmp_path):
     result = process_image(src, options, TorchUpscaler(manager))
     assert result.output.name == "grandma_1962_restored_colorized_2x.jpg"
     assert result.output_size == (628, 800) and result.colorized and result.faces == 1
+
+
+def test_colorized_portrait_with_camera_look():
+    """Real DeOldify colorization, then a portrait look: skin stays natural."""
+    from pixelift.core import camera_looks as cl
+    from pixelift.models.restoration import DEOLDIFY_ARTISTIC
+
+    restorer = _restorer(DEOLDIFY_ARTISTIC.id)
+    settings = rs.RestorationSettings(
+        level=rs.CUSTOM, custom=rs.Stages(fading=30), colorize=True, modern=rs.MODERN_OFF
+    )
+    src = _load("portrait_bw.jpg")
+    plain = restorer.restore(src, settings, model="realesrgan")
+    look = cl.CameraLookSettings("canon-portrait", 100).recipe()
+    graded = restorer.restore(src, settings, model="realesrgan", look=look)
+    assert plain.colorized and graded.colorized and graded.rgb.shape == src.shape
+    expected = cl.finish_look(cl.apply_look(plain.rgb, look), look)
+    assert np.array_equal(graded.rgb, expected)  # the look follows colorization
+    h, w = src.shape[:2]
+    face = (slice(h // 4, h // 2), slice(w * 2 // 5, w * 3 // 5))
+    before = plain.rgb[face].astype(float).mean((0, 1))
+    after = graded.rgb[face].astype(float).mean((0, 1))
+    # Skin protection: the face keeps the colorizer's skin tone (red dominant).
+    assert after[0] > after[1] and after[0] > after[2]
+    assert np.abs(after - before).max() < 8

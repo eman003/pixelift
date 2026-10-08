@@ -4,6 +4,35 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-10-08
+
+### Added
+
+- **Camera Looks**: 30 camera- and film-inspired renderings — Sony-, Canon-,
+  Nikon-, Fujifilm-, Leica- and Hasselblad-inspired picture styles, Kodak-,
+  Portra- and Ektar-inspired film, Classic/Modern Film, Cinematic and Black &
+  White — clearly labelled as inspired, not official manufacturer presets.
+  - Each look combines white balance, tone curve, highlight roll-off, matte
+    fade, vibrance, eight-band hue/saturation/luminance, split toning,
+    black-and-white channel mixing, micro-contrast, sharpening and optional
+    film grain, with skin-tone protection.
+  - Intensity 0–100 % (default 50 %), Grain Look Default/Off/Low/Medium/High,
+    a Custom look (exposure, contrast, highlights, shadows, temperature, tint,
+    saturation, vibrance, eight colour bands, sharpness) that can be saved as
+    your own looks, and favorites.
+  - Gallery of look cards previewed on your own photo, grouped by category;
+    live before/after in the preview window, combined with the lighting.
+  - Applied after the lighting and (in Restore Photos mode) after
+    colorization, before upscaling; sharpening and grain go on the final
+    image. Part of the output name (`{look}`), so differently graded results
+    never overwrite each other. `--look`, `--look-intensity`, `--grain` and
+    `--list-looks` on the command line.
+
+### Fixed
+
+- The command line restored photos instead of upscaling them when the app had
+  last been left in Restore Photos mode; only `--restore` restores now.
+
 ## [1.2.0] - 2026-10-08
 
 ### Added
@@ -94,5 +123,7 @@ All notable changes to Pixelift are documented here. The format follows
   Real-ESRGAN models, CUDA / ROCm / XPU / CPU support, batch queue, before/after
   preview, model manager and a command-line interface.
 
+[1.3.0]: https://github.com/eman003/pixelift/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/eman003/pixelift/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/eman003/pixelift/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/eman003/pixelift/releases/tag/v1.0.0

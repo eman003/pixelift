@@ -7,10 +7,11 @@ import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pixelift.core import camera_looks as cl
 from pixelift.core import lighting
 from pixelift.core.image_processor import ProcessingOptions
 from pixelift.core.restoration import settings as rs
@@ -53,6 +54,31 @@ class Settings:
     lighting_temperature: int = 0
     lighting_tint: int = 0
     lighting_saturation: int = 0
+    # Camera look (applied after the lighting). The look_<name> values are the
+    # Custom look's controls (cl.CUSTOM_NAMES); saved looks are named sets of
+    # them, selected as "user:<name>".
+    camera_look: str = cl.ORIGINAL
+    camera_look_intensity: int = cl.DEFAULT_INTENSITY
+    camera_look_grain: str = cl.GRAIN_AUTO
+    camera_look_favorites: list[str] = field(default_factory=list)
+    camera_look_saved: dict[str, dict[str, int]] = field(default_factory=dict)
+    look_exposure: int = 0
+    look_contrast: int = 0
+    look_highlights: int = 0
+    look_shadows: int = 0
+    look_temperature: int = 0
+    look_tint: int = 0
+    look_saturation: int = 0
+    look_vibrance: int = 0
+    look_red: int = 0
+    look_orange: int = 0
+    look_yellow: int = 0
+    look_green: int = 0
+    look_aqua: int = 0
+    look_blue: int = 0
+    look_purple: int = 0
+    look_magenta: int = 0
+    look_sharpness: int = 0
     # Photo restoration (mode "restore"). The restore_<stage> values are the
     # Custom level's stages; restore_<color> the manual colour correction.
     mode: str = "upscale"  # upscale | restore
@@ -110,7 +136,55 @@ class Settings:
             key = f"lighting_{name}"
             setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
         self._normalise_restoration(default)
+        self._normalise_camera_look(default)
         return self
+
+    def _normalise_camera_look(self, default: Settings) -> None:
+        self.camera_look_saved = {
+            str(name)[:60]: cl.clean_custom_values(values)
+            for name, values in (
+                self.camera_look_saved.items() if isinstance(self.camera_look_saved, dict) else ()
+            )
+            if str(name).strip() and isinstance(values, dict)
+        }
+        if not self._look_exists(self.camera_look):
+            self.camera_look = default.camera_look
+        favorites = (
+            self.camera_look_favorites if isinstance(self.camera_look_favorites, list) else []
+        )
+        self.camera_look_favorites = list(
+            dict.fromkeys(
+                f
+                for f in favorites
+                if isinstance(f, str) and f != cl.ORIGINAL and self._look_exists(f)
+            )
+        )
+        self.camera_look_intensity = min(100, max(0, int(self.camera_look_intensity)))
+        if self.camera_look_grain not in cl.GRAIN_CHOICES:
+            self.camera_look_grain = default.camera_look_grain
+        for name, value in cl.clean_custom_values(self.look_values()).items():
+            setattr(self, f"look_{name}", value)
+
+    def _look_exists(self, look_id: object) -> bool:
+        if not isinstance(look_id, str):
+            return False
+        if look_id.startswith(cl.USER_PREFIX):
+            return look_id[len(cl.USER_PREFIX) :] in self.camera_look_saved
+        return cl.has_look(look_id)
+
+    def look_values(self) -> dict[str, int]:
+        """The Custom look's control values."""
+        return {name: getattr(self, f"look_{name}") for name in cl.CUSTOM_NAMES}
+
+    def camera_look_settings(self) -> cl.CameraLookSettings:
+        look = self.camera_look
+        if look.startswith(cl.USER_PREFIX):
+            values = self.camera_look_saved.get(look[len(cl.USER_PREFIX) :], {})
+        else:
+            values = self.look_values()
+        return cl.CameraLookSettings(
+            look, self.camera_look_intensity, self.camera_look_grain, cl.custom_recipe(values)
+        )
 
     def _normalise_restoration(self, default: Settings) -> None:
         if self.mode not in MODES:
@@ -182,6 +256,7 @@ class Settings:
             existing=self.existing,  # type: ignore[arg-type]
             preserve_metadata=self.preserve_metadata,
             lighting=self.lighting(),
+            camera_look=self.camera_look_settings(),
             restoration=self.restoration() if self.mode == "restore" else None,
         )
 

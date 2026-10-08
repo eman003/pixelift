@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from pixelift import APP_NAME, __version__
+from pixelift.core import camera_looks as cl
 from pixelift.core import device_manager as dm
 from pixelift.core.batch_processor import BatchEvent, BatchProcessor, EventKind, QueueItem
 from pixelift.core.control import JobControl
@@ -17,7 +18,7 @@ from pixelift.core.model_manager import ModelManager
 from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import KIND_LABELS, all_families
-from pixelift.storage.settings import load_settings
+from pixelift.storage.settings import Settings, load_settings
 from pixelift.utils.image_utils import OUTPUT_FORMATS, collect_images, human_size
 from pixelift.utils.logging import setup_logging
 
@@ -115,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--template",
         default=settings.filename_template,
         help="output filename template, fields: {name} {scale} {model} "
-        "{width} {height} {ext} {lighting} (default: %(default)s)",
+        "{width} {height} {ext} {lighting} {look} (default: %(default)s)",
     )
     parser.add_argument(
         "-l",
@@ -131,6 +132,34 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PERCENT",
         help="lighting profile strength 0-100; not used with 'custom' "
         f"(default: {settings.lighting_intensity})",
+    )
+    parser.add_argument(
+        "--look",
+        choices=[look.id for look in cl.all_looks()]
+        + [cl.USER_PREFIX + name for name in settings.camera_look_saved],
+        default=settings.camera_look,
+        metavar="LOOK",
+        help="camera-inspired look applied after the lighting (see --list-looks); "
+        "'custom' uses the values set in the app, 'user:NAME' a look saved there "
+        "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--look-intensity",
+        type=_percent,
+        metavar="PERCENT",
+        help="camera look strength 0-100; not used with 'custom' "
+        f"(default: {settings.camera_look_intensity})",
+    )
+    parser.add_argument(
+        "--grain",
+        choices=cl.GRAIN_CHOICES,
+        help="film grain: 'auto' uses the look's own grain "
+        f"(default: {settings.camera_look_grain})",
+    )
+    parser.add_argument(
+        "--list-looks",
+        action="store_true",
+        help="list the camera looks (and your saved looks) and exit",
     )
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument("--overwrite", action="store_const", const="overwrite", dest="existing")
@@ -308,11 +337,24 @@ def _download(manager: ModelManager, ids: list[str]) -> int:
     return 0
 
 
+def _list_looks(settings: Settings) -> None:
+    print("Camera looks (camera-inspired, not official manufacturer presets):")
+    for look in cl.all_looks():
+        label = f" [{look.category_label}]" if look.category_label else ""
+        print(f"  {look.id:<26} {look.name}{label} — {look.description}")
+    if settings.camera_look_saved:
+        print("Your saved looks:")
+        for name in sorted(settings.camera_look_saved):
+            print(f"  {cl.USER_PREFIX + name:<26} {name}")
+
+
 def run_cli(argv: list[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.lighting == "custom" and args.lighting_intensity is not None:
         parser.error("--lighting-intensity does not apply to --lighting custom")
+    if args.look == cl.CUSTOM and args.look_intensity is not None:
+        parser.error("--look-intensity does not apply to --look custom")
     restore_only = (
         "restore_level",
         "colorize",
@@ -335,6 +377,9 @@ def run_cli(argv: list[str]) -> int:
             print(f"  {dev.id:<8} {dev.label()}{mem}")
         for hint in report.hints:
             print(f"  note: {hint}")
+        return 0
+    if args.list_looks:
+        _list_looks(load_settings())
         return 0
     if args.list_models:
         _list_models(manager)
@@ -380,8 +425,15 @@ def run_cli(argv: list[str]) -> int:
     if args.lighting_intensity is not None:
         settings.lighting_intensity = args.lighting_intensity
     options.lighting = settings.normalise().lighting()
-    if args.restore:
-        options.restoration = _restoration_from_args(args, settings)
+    settings.camera_look = args.look
+    if args.look_intensity is not None:
+        settings.camera_look_intensity = args.look_intensity
+    if args.grain is not None:
+        settings.camera_look_grain = args.grain
+    options.camera_look = settings.normalise().camera_look_settings()
+    # Only --restore restores: the app's last mode (Restore Photos) must not
+    # turn a plain upscale on the command line into a restoration.
+    options.restoration = _restoration_from_args(args, settings) if args.restore else None
     try:
         options.validate()
         if options.restoration is None:
@@ -403,6 +455,11 @@ def run_cli(argv: list[str]) -> int:
         lighting = f" · lighting {name}"
         if options.lighting.profile != "custom":
             lighting += f" {options.lighting.intensity}%"
+    if options.camera_look.active:
+        look = options.camera_look
+        lighting += f" · look {look.name()}"
+        if look.look != cl.CUSTOM:
+            lighting += f" {look.intensity}%"
     if options.restoration is not None:
         restoration = options.restoration
         parts = [rs.LEVEL_LABELS[restoration.level] + " restoration"]

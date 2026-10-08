@@ -1,7 +1,9 @@
-"""Single-image pipeline: load -> lighting -> upscale -> restore alpha/mode -> save.
+"""Single-image pipeline: load -> lighting -> camera look -> upscale -> look
+finish (sharpening, grain) -> restore alpha/mode -> save.
 
 With ``ProcessingOptions.restoration`` set, the photo-restoration pipeline
-(which applies the lighting and upscales itself) replaces the middle steps;
+(which applies the lighting and camera look and upscales itself) replaces the
+middle steps;
 loading, metadata, output naming and saving are shared.
 
 Shared by the GUI and the CLI.
@@ -21,6 +23,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 from PIL import Image
 
+from pixelift.core.camera_looks import CameraLookSettings, apply_look, finish_look
 from pixelift.core.control import JobControl
 from pixelift.core.errors import ImageTooLargeError, OutputError, UpscalerError
 from pixelift.core.lighting import LightingSettings, apply_lighting
@@ -57,6 +60,7 @@ class ProcessingOptions:
     preserve_metadata: bool = True
     jpeg_background: tuple[int, int, int] = (255, 255, 255)
     lighting: LightingSettings = field(default_factory=LightingSettings)
+    camera_look: CameraLookSettings = field(default_factory=CameraLookSettings)
     # Photo restoration instead of plain upscaling (None = upscaling).
     restoration: RestorationSettings | None = None
 
@@ -86,6 +90,7 @@ class ProcessResult:
     skipped: bool = False
     note: str = ""
     lighting: str = ""  # LightingSettings.tag() the output was made with
+    look: str = ""  # CameraLookSettings.tag() the output was made with
     restoration: str | None = None  # restoration_tag() the output was made with; None: upscaled
     colorized: bool = False
     faces: int = 0  # faces restored
@@ -118,7 +123,7 @@ def restoration_tag(options: ProcessingOptions, colorized: bool) -> str:
 
 
 def restoration_template(restoration: RestorationSettings, colorized: bool) -> str:
-    """``{name}_restored[-tag][_colorized][_{scale}x]`` (lighting tag appended later)."""
+    """``{name}_restored[-tag][_colorized][_{scale}x]`` (lighting/look tags appended later)."""
     tag = restoration.tag(colorized)
     template = "{name}_restored" + (f"-{tag}" if tag else "")
     if colorized:
@@ -154,6 +159,7 @@ def output_path_for(
         height * scale,
         ext,
         options.lighting.tag(),
+        options.camera_look.tag(),
     )
     return folder / name
 
@@ -286,6 +292,7 @@ def process_image(
             skipped=True,
             note="Output already exists",
             lighting=options.lighting.tag(),
+            look=options.camera_look.tag(),
             restoration=tag,
             colorized=colorize,
         )
@@ -297,6 +304,7 @@ def process_image(
         control.check()
 
     lighting = options.lighting.adjustments()
+    look = options.camera_look.recipe()
     note = ""
     faces = 0
     if restoring:
@@ -313,6 +321,14 @@ def process_image(
             apply_lighting(loaded.rgb, lighting, out=loaded.rgb)
             if control:
                 control.check()
+        # The camera look follows the lighting, for the same reasons; only its
+        # sharpening and grain wait for the upscaled image (the model would
+        # smooth grain away and exaggerate sharpening).
+        if not look.grade_neutral:
+            report(0.015, "Applying camera look")
+            apply_look(loaded.rgb, look, out=loaded.rgb)
+            if control:
+                control.check()
 
         def on_tiles(done: int, total: int) -> None:
             report(0.02 + 0.9 * done / max(total, 1), f"Upscaling (tile {done}/{total})")
@@ -321,8 +337,11 @@ def process_image(
         rgb = upscaler.upscale(
             loaded.rgb, options.scale, options.model, progress=on_tiles, control=control
         )
+        if not look.finish_neutral:
+            report(0.92, "Finishing camera look")
+            rgb = finish_look(rgb, look, out=rgb if rgb.flags.writeable else None)
         # A warmed, cooled or tinted grey source keeps that colour (as previewed).
-        keep_gray = loaded.grayscale and not lighting.changes_colour
+        keep_gray = loaded.grayscale and not lighting.changes_colour and not look.changes_colour
     out_h, out_w = rgb.shape[:2]
     in_size = (loaded.width, loaded.height)
     del loaded.rgb  # free the decoded input before encoding the output
@@ -372,6 +391,7 @@ def process_image(
         elapsed,
         note=note,
         lighting=options.lighting.tag(),
+        look=options.camera_look.tag(),
         restoration=tag,
         colorized=colorize,
         faces=faces,
@@ -405,6 +425,7 @@ def _restore(
         settings,
         model=options.model,
         lighting=options.lighting.adjustments(),
+        look=options.camera_look.recipe(),
         mono=mono,
         progress=lambda f, stage: report(0.01 + 0.91 * f, stage),
         control=control,

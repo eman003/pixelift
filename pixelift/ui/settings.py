@@ -233,7 +233,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
         except (ValueError, IndexError, KeyError):
             row.add_css_class("error")
             self.template_hint.set_title(
-                "Unknown field — use {name} {scale} {model} {width} {height} {ext} {lighting}"
+                "Unknown field — use {name} {scale} {model} {width} {height} {ext} {lighting} "
+                "{look}"
             )
             return
         row.remove_css_class("error")
@@ -251,6 +252,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             4320,
             ext,
             self.settings.lighting().tag(),
+            self.settings.camera_look_settings().tag(),
         )
         self.template_hint.set_title(f"Example: photo.jpg → {example}")
 

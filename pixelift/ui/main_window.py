@@ -1,4 +1,5 @@
-"""Main window: drop zone, image queue, output and lighting options, batch controls.
+"""Main window: drop zone, image queue, output, lighting and camera look options,
+batch controls.
 
 Two modes share the queue, the worker and the output options: *Upscale* and
 *Restore Photos* (AI photo restoration, which can also upscale).
@@ -26,8 +27,9 @@ from pixelift.core.image_processor import restoration_tag
 from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
-from pixelift.ui.async_utils import idle
+from pixelift.ui.async_utils import idle, run_in_thread
 from pixelift.ui.image_queue import QueueRow, ThumbnailLoader
+from pixelift.ui.widgets.camera_looks import CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.ui.widgets.restoration import (
@@ -36,7 +38,7 @@ from pixelift.ui.widgets.restoration import (
     RestorationDialog,
     RestorationPanel,
 )
-from pixelift.utils.image_utils import SUPPORTED_EXTENSIONS, collect_images
+from pixelift.utils.image_utils import SUPPORTED_EXTENSIONS, collect_images, load_preview
 
 if TYPE_CHECKING:
     from pixelift.ui.application import UpscalerApplication
@@ -44,6 +46,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 SCALES = (2, 4)
+LOOK_SAMPLE_SIZE = 400  # the camera look cards' sample photo (px, longest side)
 FORMATS = (("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WebP"))
 
 
@@ -61,6 +64,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._inhibit_cookie = 0
         self._syncing = False
         self._bw_answered = False  # asked "Restore in B&W or colorize?" this session
+        self._look_sample_path: Path | None = None  # shown on the camera look cards
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(self._build_header())
@@ -83,6 +87,7 @@ class MainWindow(Adw.ApplicationWindow):
         narrow.add_setter(self.options_box, "orientation", Gtk.Orientation.VERTICAL)
         narrow.add_setter(self.restore_panel, "orientation", Gtk.Orientation.VERTICAL)
         narrow.add_setter(self.lighting, "orientation", Gtk.Orientation.VERTICAL)
+        narrow.add_setter(self.camera_look, "orientation", Gtk.Orientation.VERTICAL)
         narrow.add_setter(self.buttons_box, "orientation", Gtk.Orientation.VERTICAL)
         self.add_breakpoint(narrow)
 
@@ -241,6 +246,8 @@ class MainWindow(Adw.ApplicationWindow):
         panel.append(self.options_box)
         self.lighting = LightingControls(self.app)
         panel.append(self.lighting)
+        self.camera_look = CameraLookControls(self.app)
+        panel.append(self.camera_look)
 
         # Progress area (only while a batch is running / just finished)
         self.progress_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
@@ -372,8 +379,8 @@ class MainWindow(Adw.ApplicationWindow):
         return restoration_tag(options, colorize)
 
     def _reset_stale(self) -> None:
-        """Results made with other lighting or restoration settings (or in the
-        other mode) are out of date: queue them again.
+        """Results made with other lighting, camera look or restoration settings
+        (or in the other mode) are out of date: queue them again.
 
         Their files stay on disk (the settings are part of the file name), so
         switching back just finds and skips them.
@@ -381,6 +388,7 @@ class MainWindow(Adw.ApplicationWindow):
         if self.running:
             return
         tag = self.app.settings.lighting().tag()
+        look = self.app.settings.camera_look_settings().tag()
         stale = [
             r
             for r in self.rows
@@ -388,6 +396,7 @@ class MainWindow(Adw.ApplicationWindow):
             and r.item.result is not None
             and (
                 r.item.result.lighting != tag
+                or r.item.result.look != look
                 or r.item.result.restoration != self._expected_restoration(r)
             )
         ]
@@ -495,6 +504,7 @@ class MainWindow(Adw.ApplicationWindow):
 
         def ready(info: object, thumb: object, mono: bool, r: QueueRow = row) -> None:
             r.set_info(info, thumb, mono)
+            self._update_look_sample()
             self._update_bw_banner()
             self._update_state()
 
@@ -509,8 +519,33 @@ class MainWindow(Adw.ApplicationWindow):
             return
         self.rows.remove(row)
         self.listbox.remove(row)
+        self._update_look_sample()
         self._update_bw_banner()
         self._update_state()
+
+    def _update_look_sample(self) -> None:
+        """The camera look cards show the first photo in the queue (uncropped,
+        decoded at card resolution in the background)."""
+        path = next((r.item.path for r in self.rows if r.ready), None)
+        if path == self._look_sample_path:
+            return
+        self._look_sample_path = path
+        if path is None:
+            self.camera_look.set_sample(None)
+            return
+
+        def done(result: tuple, wanted: Path = path) -> None:
+            if wanted == self._look_sample_path:
+                self.camera_look.set_sample(result[0])
+
+        run_in_thread(
+            load_preview,
+            path,
+            LOOK_SAMPLE_SIZE,
+            on_done=done,
+            on_error=lambda e: log.warning("Look sample failed: %s", e),
+            name="look-sample",
+        )
 
     def clear_finished(self) -> None:
         for row in list(self.rows):
@@ -865,6 +900,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.restore_panel.set_sensitive(not running)
         self.mode_box.set_sensitive(not running)
         self.lighting.set_sensitive(not running)
+        self.camera_look.set_sensitive(not running)
         from pixelift.ui.preview import PreviewWindow
 
         for window in self.app.get_windows():

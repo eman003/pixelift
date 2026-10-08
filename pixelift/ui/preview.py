@@ -5,9 +5,10 @@ pixels per side. When the user zooms in beyond the preview's resolution, only
 the visible region is decoded at full resolution (in a background thread) and
 drawn on top — the full-resolution image is never kept in memory by the UI.
 
-Before an image is upscaled, the "after" side previews the lighting profile:
-it is applied to a downscaled copy of the original (never the AI model), and
-to the decoded region when zoomed in, so slider changes update in a moment.
+Before an image is upscaled, the "after" side previews the lighting profile
+and the camera look: they are applied to a downscaled copy of the original
+(never the AI model), and to the decoded region when zoomed in, so slider
+changes update in a moment.
 
 In Restore Photos mode, "Preview Restoration" runs the full restoration
 (without upscaling) on that downscaled copy, so settings can be judged before
@@ -25,11 +26,13 @@ from typing import ClassVar
 from gi.repository import Adw, Gdk, GLib, GObject, Graphene, Gsk, Gtk, Pango
 from PIL import Image
 
+from pixelift.core import camera_looks as cl
 from pixelift.core.batch_processor import ItemStatus, QueueItem
 from pixelift.core.control import JobControl
 from pixelift.core.errors import CancelledError, UpscalerError, friendly_error
-from pixelift.core.lighting import Adjustments, apply_to_pil
+from pixelift.core.lighting import Adjustments
 from pixelift.ui.async_utils import run_in_thread
+from pixelift.ui.widgets.camera_looks import CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.ui.widgets.textures import texture_from_pil
@@ -62,8 +65,9 @@ class _Side:
         self.source_size: tuple[int, int] = (0, 0)  # full-resolution size of the file
         self.detail: tuple[Gdk.Texture, tuple[float, float, float, float]] | None = None
         self.generation = 0
-        # Applied (off the main thread) to detail crops decoded from ``path``.
-        self.transform: Callable[[Image.Image], Image.Image] | None = None
+        # Applied (off the main thread) to detail crops decoded from ``path``;
+        # gets the crop and its scale relative to the full-resolution file.
+        self.transform: Callable[[Image.Image, float], Image.Image] | None = None
 
     def clear(self) -> None:
         self.path = None
@@ -221,7 +225,7 @@ class CompareView(Gtk.Widget):
 
         def load() -> Image.Image:
             region = load_region(path, box, (out_w, out_h))
-            return transform(region) if transform else region
+            return transform(region, out_w / (box[2] - box[0])) if transform else region
 
         def done(img: Image.Image) -> None:
             if generation == side.generation:
@@ -389,8 +393,14 @@ class PreviewWindow(Adw.Window):
         self.item = item
         self.info = info
         self._lighting_base: Image.Image | None = None  # downscaled original
-        self._lighting_shown: Adjustments | None = Adjustments()  # None: unknown
+        # (lighting, camera look, output scale) shown on the after side; None: unknown.
+        self._lighting_shown: tuple[Adjustments, cl.LookRecipe, int] | None = (
+            Adjustments(),
+            cl.LookRecipe(),
+            0,
+        )
         self.lighting: LightingControls | None = None
+        self.camera_look: CameraLookControls | None = None
         self._lighting_busy = False
         self._lighting_generation = 0
         output = (
@@ -498,13 +508,17 @@ class PreviewWindow(Adw.Window):
         hint.add_css_class("caption")
         bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         if self.output is None:
-            # Not upscaled yet: tune the lighting here and see it on the right.
-            # (An upscaled result already has its lighting baked in.)
+            # Not upscaled yet: tune the lighting and camera look here and see
+            # them on the right. (An upscaled result already has them baked in.)
             self.lighting = LightingControls(self.app)
-            self.lighting.set_margin_top(6)
-            self.lighting.set_margin_start(12)
-            self.lighting.set_margin_end(12)
-            bottom.append(Adw.Clamp(maximum_size=720, child=self.lighting))
+            self.camera_look = CameraLookControls(self.app)
+            looks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            looks.append(self.lighting)
+            looks.append(self.camera_look)
+            looks.set_margin_top(6)
+            looks.set_margin_start(12)
+            looks.set_margin_end(12)
+            bottom.append(Adw.Clamp(maximum_size=820, child=looks))
             # A running batch has already taken its lighting (main window too).
             self.set_lighting_editable(not getattr(parent, "running", False))
             self.app.on_lighting_changed(self._update_lighting)
@@ -523,8 +537,9 @@ class PreviewWindow(Adw.Window):
         )
 
     def set_lighting_editable(self, editable: bool) -> None:
-        if self.lighting is not None:
-            self.lighting.set_sensitive(editable)
+        for controls in (self.lighting, self.camera_look):
+            if controls is not None:
+                controls.set_sensitive(editable)
 
     def cancel_restoration(self) -> None:
         """Stop a running restoration preview (window closed or a batch started)."""
@@ -555,6 +570,8 @@ class PreviewWindow(Adw.Window):
         else:
             self.view.set_images(before_size)
             self._lighting_base = base
+            if self.camera_look is not None:
+                self.camera_look.set_sample(base)
             self._update_lighting()
         self._update_zoom_label()
 
@@ -593,6 +610,8 @@ class PreviewWindow(Adw.Window):
         self.restore_btn.set_sensitive(False)
         self.restore_btn.set_label("Restoring…")
         lighting = options.lighting.adjustments()
+        look = options.camera_look.recipe()
+        look_output = self._output_size(options.output_scale)
 
         def work() -> Image.Image:
             from pixelift.core.restoration.analysis import detect_monochrome_file
@@ -600,7 +619,14 @@ class PreviewWindow(Adw.Window):
             mono = detect_monochrome_file(self.item.path)
             control.check()
             result = restorer.restore(
-                base, quick, model=options.model, lighting=lighting, mono=mono, control=control
+                base,
+                quick,
+                model=options.model,
+                lighting=lighting,
+                look=look,
+                look_output=look_output,
+                mono=mono,
+                control=control,
             )
             return Image.fromarray(result.rgb).convert("RGBA")
 
@@ -646,8 +672,19 @@ class PreviewWindow(Adw.Window):
 
         run_in_thread(work, on_done=done, on_error=failed, name="preview-restore")
 
+    def _wanted_look(self) -> tuple[Adjustments, cl.LookRecipe, int]:
+        settings = self.app.settings
+        scale = settings.processing_options().output_scale
+        return settings.lighting().adjustments(), settings.camera_look_settings().recipe(), scale
+
+    def _output_size(self, scale: int) -> tuple[int, int]:
+        """The export's size: the look's grain and sharpening are previewed as
+        they will look there."""
+        sw, sh = self.view.before.source_size
+        return sw * scale, sh * scale
+
     def _update_lighting(self) -> None:
-        """Re-render the lighting side if the lighting settings changed."""
+        """Re-render the after side if the lighting or camera look changed."""
         if self._lighting_base is None:
             return
         if self._restore_shown or self._restore_busy:
@@ -655,14 +692,16 @@ class PreviewWindow(Adw.Window):
             if self.restore_btn is not None and not self._restore_busy:
                 self.restore_btn.set_label("Update Preview")
             return
-        wanted = self.app.settings.lighting().adjustments()
+        wanted = self._wanted_look()
         if wanted == self._lighting_shown:
             return
         if self._lighting_busy:
             return  # picked up when the running render finishes
         self._lighting_shown = wanted
         after = self.view.after
-        if wanted.is_neutral:
+        adjustments, recipe, scale = wanted
+        output = self._output_size(scale)
+        if adjustments.is_neutral and recipe.is_neutral:
             after.clear()
             self._set_lighting_mode(False)
             return
@@ -677,8 +716,15 @@ class PreviewWindow(Adw.Window):
             after.texture = texture_from_pil(img)
             after.path = self.item.path
             after.source_size = self.view.before.source_size
-            after.transform = lambda region, a=wanted: apply_to_pil(region, a)
-            self._set_lighting_mode(True)
+            sw, sh = self.view.before.source_size
+            after.transform = lambda region, crop_scale: cl.apply_to_pil(
+                region,
+                recipe,
+                adjustments,
+                frame=(round(sw * crop_scale), round(sh * crop_scale)),
+                output=output,
+            )
+            self._set_lighting_mode(True, adjustments, recipe)
             self.view.invalidate_detail(after)
             self._update_lighting()  # settings may have moved on meanwhile
 
@@ -690,24 +736,32 @@ class PreviewWindow(Adw.Window):
             # Nothing valid is shown now: any later change renders again, and
             # one made during this render is picked up straight away.
             self._lighting_shown = None
-            if self.app.settings.lighting().adjustments() != wanted:
+            if self._wanted_look() != wanted:
                 self._update_lighting()
 
         run_in_thread(
-            apply_to_pil,
-            self._lighting_base,
-            wanted,
+            lambda: cl.apply_to_pil(
+                self._lighting_base, recipe, adjustments, quick=True, output=output
+            ),
             on_done=done,
             on_error=failed,
             name="preview-lighting",
         )
 
-    def _set_lighting_mode(self, on: bool) -> None:
+    def _set_lighting_mode(
+        self,
+        on: bool,
+        adjustments: Adjustments | None = None,
+        recipe: cl.LookRecipe | None = None,
+    ) -> None:
         was_on = self.modes.get_sensitive()
         self.modes.set_sensitive(on)
-        self.view.after_label = "Lighting"
-        self.mode_buttons["after"].set_label("Lighting" if on else "After")
-        self.mode_buttons["after"].set_tooltip_text("With lighting (A)")
+        lit = adjustments is not None and not adjustments.is_neutral
+        graded = recipe is not None and not recipe.is_neutral
+        label = "Adjusted" if lit and graded else "Camera Look" if graded else "Lighting"
+        self.view.after_label = label
+        self.mode_buttons["after"].set_label(label if on else "After")
+        self.mode_buttons["after"].set_tooltip_text(f"With {label.lower()} (A)")
         if on and not was_on:
             self.mode_buttons["slider"].set_active(True)
         elif not on:
@@ -719,8 +773,9 @@ class PreviewWindow(Adw.Window):
         self.cancel_restoration()
         self._lighting_generation += 1
         self.app.off_lighting_changed(self._update_lighting)
-        if self.lighting is not None:
-            self.lighting.shutdown()
+        for controls in (self.lighting, self.camera_look):
+            if controls is not None:
+                controls.shutdown()
         return False
 
     def _on_load_error(self, exc: BaseException) -> None:

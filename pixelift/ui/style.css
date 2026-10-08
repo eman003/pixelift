@@ -39,3 +39,19 @@
 .bw-banner {
   padding: 10px 14px;
 }
+
+.look-card {
+  padding: 4px;
+  border-radius: 10px;
+}
+
+.look-card.selected-look {
+  background-color: alpha(@accent_bg_color, 0.18);
+  outline: 2px solid alpha(@accent_color, 0.8);
+  outline-offset: -2px;
+}
+
+.look-thumb {
+  border-radius: 6px;
+  background-color: alpha(currentColor, 0.06);
+}

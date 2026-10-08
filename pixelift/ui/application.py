@@ -122,7 +122,8 @@ class UpscalerApplication(Adw.Application):
             listener()
 
     def on_lighting_changed(self, listener: Callable[[], None]) -> None:
-        """Called when the lighting values change (also on any settings change)."""
+        """Called when the lighting or camera look values change (also on any
+        settings change)."""
         self._lighting_listeners.append(listener)
 
     def off_lighting_changed(self, listener: Callable[[], None]) -> None:

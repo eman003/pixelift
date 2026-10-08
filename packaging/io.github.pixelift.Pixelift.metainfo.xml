@@ -15,6 +15,8 @@
       <li>NVIDIA CUDA, AMD ROCm and Intel XPU acceleration with automatic CPU fallback</li>
       <li>Tiled processing for very large images</li>
       <li>Lighting profiles with a live preview</li>
+      <li>Camera-inspired looks (camera picture styles, film stocks, black and white)
+        with intensity, film grain and skin-tone protection</li>
       <li>AI photo restoration: dust, scratches, fading, colour casts and faces, with
         optional colorization of black-and-white photos</li>
       <li>Keeps transparency, colour profiles and EXIF metadata</li>
@@ -24,6 +26,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.0" date="2026-10-08">
+      <description>
+        <p>Camera Looks: 30 camera- and film-inspired renderings with intensity, film grain,
+          skin-tone protection, favorites and your own saved looks, previewed on your photo.
+          The looks are Pixelift's own interpretations, not official manufacturer presets.</p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-10-08">
       <description>
         <p>AI Photo Restoration: repair dust, scratches, noise and fading, correct

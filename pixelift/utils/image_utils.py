@@ -227,13 +227,15 @@ def render_filename(
     height: int,
     ext: str,
     lighting: str = "",
+    look: str = "",
 ) -> str:
     """Expand a filename template such as ``{name}_{scale}x`` and append ``ext``.
 
-    Fields: {name} {ext} {scale} {model} {width} {height} {lighting}. Unknown
-    fields raise ValueError so typos are caught when the setting is changed.
-    A non-empty ``lighting`` tag the template does not place is appended as
-    ``_<tag>``, so differently lit results never share a name.
+    Fields: {name} {ext} {scale} {model} {width} {height} {lighting} {look}.
+    Unknown fields raise ValueError so typos are caught when the setting is
+    changed. A non-empty ``lighting`` or ``look`` (camera look) tag the
+    template does not place is appended as ``_<tag>``, so differently lit or
+    graded results never share a name.
     """
     template = template.strip() or DEFAULT_TEMPLATE
     values = {
@@ -244,6 +246,7 @@ def render_filename(
         "width": width,
         "height": height,
         "lighting": lighting,
+        "look": look,
     }
     fields = {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
     for field_name in fields:
@@ -251,6 +254,8 @@ def render_filename(
             raise ValueError(f"Unknown field {{{field_name}}} in filename template")
     if lighting and "lighting" not in fields:
         template += "_{lighting}"
+    if look and "look" not in fields:
+        template += "_{look}"
     stem = _FIELD_RE.sub("_", template.format(**values)).strip(". ") or source.stem
     return stem + ext
 

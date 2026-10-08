@@ -137,3 +137,15 @@ def test_main_dispatch_uses_cli(monkeypatch):
     monkeypatch.setattr(cli, "run_cli", lambda argv: called.setdefault("argv", argv) and 0)
     main_mod.main(["x.png", "--scale", "2"])
     assert called["argv"] == ["x.png", "--scale", "2"]
+
+
+def test_cli_upscales_even_when_the_app_was_left_in_restore_mode(
+    image_factory, tiny_specs, tmp_path, capsys
+):
+    save_settings(Settings(mode="restore"))
+    src = image_factory("photo.jpg")
+    args = [str(src), "-s", "4", "-m", "test-x4", "-o", str(tmp_path / "out"), "--device", "cpu"]
+    assert cli.run_cli(args) == 0
+    with Image.open(tmp_path / "out" / "photo_4x.png") as img:
+        assert img.size == (160, 120)
+    assert "1 upscaled" in capsys.readouterr().out

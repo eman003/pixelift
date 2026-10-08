@@ -242,7 +242,7 @@ def apply_lighting(
         out = np.empty_like(rgb)
     height, width = rgb.shape[:2]
     rows = max(1, _CHUNK_PIXELS // max(width, 1))
-    plan = _Plan(adjustments.clamped())
+    plan = TonePlan(adjustments.clamped())
     for y0 in range(0, height, rows):
         y1 = min(height, y0 + rows)
         band = plan.run(plan.decode(rgb[y0:y1]))
@@ -254,19 +254,20 @@ def apply_lighting(
 
 
 def apply_to_pil(img: Image.Image, adjustments: Adjustments) -> Image.Image:
-    """Apply to a Pillow image, keeping its alpha channel (used by the preview)."""
-    if adjustments.is_neutral:
-        return img
-    alpha = img.getchannel("A") if img.mode in ("RGBA", "LA") else None
-    rgb = np.array(img.convert("RGB"))
-    result = Image.fromarray(apply_lighting(rgb, adjustments, out=rgb), "RGB")
-    if alpha is not None:
-        result.putalpha(alpha)
-    return result
+    """Apply to a Pillow image, keeping its alpha channel.
+
+    The preview's implementation (lighting plus camera look) with no look.
+    """
+    from pixelift.core import camera_looks  # imports this module
+
+    return camera_looks.apply_to_pil(img, camera_looks.LookRecipe(), adjustments)
 
 
-class _Plan:
-    """Adjustments converted to curve parameters, applied to float bands in 0..1."""
+class TonePlan:
+    """Adjustments converted to curve parameters, applied to float bands in 0..1.
+
+    Also the first stage of the camera looks (:mod:`pixelift.core.camera_looks`).
+    """
 
     def __init__(self, adj: Adjustments) -> None:
         # White balance as per-channel gains in linear light, normalised so a
@@ -339,19 +340,26 @@ class _Plan:
             hi = np.maximum(np.maximum(r, g), b)[..., None]
             lo = np.minimum(np.minimum(r, g), b)[..., None]
             factor = 1 + self.saturation * (1 - 0.5 * (hi - lo))
-            eps = np.float32(1e-6)
-            room = np.minimum((1 - lum) / np.maximum(hi, eps), lum / np.maximum(-lo, eps))
-            # Soft minimum of the boost and the room left before a channel
-            # clips: colours approach the gamut edge smoothly instead of piling
-            # up on it.
-            boost = factor - 1
-            headroom = np.maximum(room - 1, 0)
-            factor = 1 + boost * headroom / (boost + headroom + eps)
-            x *= factor
+            x *= gamut_safe(factor, lum, hi, lo)
         else:
             x *= np.float32(1 + self.saturation)
         x += lum
         return x
+
+
+def gamut_safe(factor: np.ndarray, lum: np.ndarray, hi: np.ndarray, lo: np.ndarray) -> np.ndarray:
+    """Limit chroma boosts (``factor`` > 1) to the room left before a channel clips.
+
+    ``hi``/``lo`` are the largest and smallest channel of the chroma (colour
+    minus ``lum``). A soft minimum of the boost and that room: colours
+    approach the gamut edge smoothly instead of piling up on it (which would
+    shift their hue). Reductions (``factor`` <= 1) pass through unchanged.
+    """
+    eps = np.float32(1e-6)
+    room = np.minimum((1 - lum) / np.maximum(hi, eps), lum / np.maximum(-lo, eps))
+    boost = np.maximum(factor - 1, 0)
+    headroom = np.maximum(room - 1, 0)
+    return np.minimum(factor, 1) + boost * headroom / (boost + headroom + eps)
 
 
 def _luma(x: np.ndarray) -> np.ndarray:

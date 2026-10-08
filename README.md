@@ -24,6 +24,10 @@ colour casts, faces, and optional colorization of black-and-white photos.
 - Lighting profiles (Natural Daylight, Golden Hour, Cinematic, Low Light
   Recovery and more) or your own custom adjustments, applied before upscaling
   with a live preview
+- **Camera Looks**: 30 camera- and film-inspired renderings (Sony-, Canon-,
+  Nikon-, Fujifilm-, Leica- and Hasselblad-inspired, Kodak/Portra/Ektar-style
+  film, cinematic and black-and-white) with intensity, film grain, skin-tone
+  protection, favorites and your own saved looks — see [Camera Looks](#camera-looks)
 - **AI Photo Restoration** for old scans: dust and scratch removal, noise
   reduction, faded-colour and yellowing correction, identity-preserving face
   restoration (GFPGAN), optional colorization of black-and-white photos
@@ -154,7 +158,8 @@ Models are stored in `~/.local/share/pixelift/models/` (override with
 
 1. Drop images or folders onto the window (or click **Select Images**, Ctrl+O).
 2. Choose **Scale**, **Model**, **Format** and **Output** folder in the bottom
-   bar, and optionally a **Lighting** profile (see [Lighting](#lighting)).
+   bar, and optionally a **Lighting** profile (see [Lighting](#lighting)) and
+   a **Look** (see [Camera Looks](#camera-looks)).
 3. Click **Start Upscaling**. Use **Pause**, **Resume**, **Cancel** and
    **Retry Failed** as needed. Images whose result already exists are skipped.
 4. Click an image (or its compare button) to open the before/after view:
@@ -163,7 +168,7 @@ Models are stored in `~/.local/share/pixelift/models/` (override with
 
 Results go to `<original folder>/upscaled/` by default, named with the template
 `{name}_{scale}x` (e.g. `photo.jpg → photo_4x.png`). Template fields: `{name}`,
-`{scale}`, `{model}`, `{width}`, `{height}`, `{ext}`, `{lighting}`.
+`{scale}`, `{model}`, `{width}`, `{height}`, `{ext}`, `{lighting}`, `{look}`.
 
 When several images in one batch would get the same output name (e.g.
 `photo.jpg` and `photo.png`), the one earlier in the queue gets `photo_4x.png`
@@ -199,6 +204,57 @@ overwrite or get mistaken for each other. Put `{lighting}` in the filename
 template to place it yourself. Changing the lighting puts finished images back
 in the queue; their earlier results stay on disk. A grayscale image stays
 grayscale unless the profile warms, cools or tints it.
+
+### Camera Looks
+
+A camera look gives a photo the colour rendering and character associated
+with a camera maker's picture styles or a classic film stock: white balance,
+tone curve, highlight roll-off, shadow tones, colour separation per hue,
+micro-contrast, sharpening and (for film looks) grain — not a single colour
+filter. Click **Look** in the bottom bar (or in the preview window) to open the
+gallery: every look is a card previewed on your own photo, filtered by
+category (All, ★ Favorites, Sony, Canon, Nikon, Fujifilm, Leica, Hasselblad,
+Film, Monochrome, My Looks). Star a card to make it a favorite.
+
+> **Camera-inspired, not official.** The looks are Pixelift's own
+> interpretations of popular styles. They are not manufacturer presets or
+> colour science, and brand names are used only to describe the style, with
+> no affiliation or endorsement.
+
+| Group | Looks |
+|---|---|
+| Sony-inspired | Natural, Vivid, Portrait, Cinematic — clean, modern, crisp micro-contrast |
+| Canon-inspired | Natural, Standard, Portrait, Landscape — warm reds, pleasant skin, smooth highlights |
+| Nikon-inspired | Neutral, Standard, Portrait, Landscape — neutral, natural greens and blues |
+| Fujifilm-inspired | Classic, Provia, Velvia, Astia, Classic Negative — rich but controlled colour, soft highlights |
+| Leica-inspired | Natural, Monochrome, Filmic — tonal separation, clean highlights, documentary feel |
+| Hasselblad-inspired | Natural, Filmic — smooth gradations, accurate colour |
+| Film | Kodak-, Portra- and Ektar-inspired, Classic Film, Modern Film, Cinematic |
+| Monochrome | Black & White (and Leica Monochrome) |
+| Custom | Exposure, contrast, highlights, shadows, temperature, tint, saturation, vibrance, eight colour bands (red … magenta) and sharpness; **Save as My Look** keeps it |
+
+- **Intensity** 0–100 % (default 50 %): 0 % is the original image, 100 % the
+  full look. **Original** (the default) changes nothing. A look you save opens
+  at 100 % — exactly as you designed it — and the slider tones it down.
+- **Grain**: Look Default / Off / Low / Medium / High. Digital-camera looks
+  have no grain by default; film looks a little.
+- **Skin-tone protection**: portrait looks (and others, more gently) keep skin
+  close to its original colour while the rest of the image takes the look.
+- **With lighting**: the lighting profile is applied first, then the look —
+  combining them does not clip highlights or crush blacks.
+
+**Processing order.** Lighting → camera look (colour and tone, at the input
+resolution, so the AI model builds on the final colours) → Real-ESRGAN →
+the look's sharpening and grain on the final image (an AI model would
+otherwise smooth the grain away). In Restore Photos mode the look follows
+restoration, colour correction and colorization, so it grades the colorized
+photo and never influences the colorizer. Looks run on the CPU (a 3D lookup
+table applied with Pillow) and take a fraction of a second on a preview, so
+changing a look or its intensity never re-runs an AI model.
+
+Like the lighting, the look is part of the output name —
+`photo_4x_fujifilm-velvia-50.png`, `…-grain-high` with a grain choice, a short
+hash for Custom and saved looks — and changing it re-queues finished images.
 
 ### Photo restoration
 
@@ -247,9 +303,9 @@ faces → upscale": black-and-white photos are first made neutral grey; dust
 and scratches are removed *before* denoising (which would smear them); noise
 is reduced *before* faded tones are stretched (which would amplify it);
 colorization runs on the cleaned photo; colour correction, Modern Finish and
-the lighting profile follow; then Real-ESRGAN upscales; faces are restored
+the lighting profile and camera look follow; then Real-ESRGAN upscales; faces are restored
 *at the output resolution* (so GFPGAN's detail is not shrunk and re-upscaled);
-sharpening comes last. Dust, scratches, noise, fading, colour and sharpening
+sharpening comes last (then the camera look's grain, if any). Dust, scratches, noise, fading, colour and sharpening
 use conventional image processing (morphology, guided filtering, levels) —
 AI is used only where it is clearly better: faces, colorization and
 upscaling.
@@ -281,6 +337,7 @@ pixelift ./photos \
     --output ./upscaled
 
 pixelift portrait.jpg --lighting golden-hour --lighting-intensity 60
+pixelift portrait.jpg --look portra --look-intensity 70 --grain low
 
 # Photo restoration
 pixelift --restore old_photos/
@@ -300,6 +357,10 @@ pixelift --restore --restore-level heavy --face strong --fidelity 30 damaged.tif
 | `--template TEMPLATE` | Output filename template |
 | `-l`, `--lighting PROFILE` | Lighting profile id, e.g. `golden-hour`; `custom` uses the values set in the app |
 | `--lighting-intensity 0-100` | Profile strength (not used with `custom`) |
+| `--look LOOK` | Camera look id, e.g. `fujifilm-classic-negative`; `custom` uses the values set in the app, `user:NAME` a look saved there (default: the look selected in the app) |
+| `--look-intensity 0-100` | Look strength (not used with `custom`) |
+| `--grain auto\|off\|low\|medium\|high` | Film grain (`auto` = the look's own) |
+| `--list-looks` | List the camera looks and your saved looks |
 | `--overwrite` / `--rename` | What to do if the output exists (default: skip) |
 | `--no-metadata` | Don't copy EXIF/ICC |
 | `--threads N` | CPU threads |
@@ -386,8 +447,9 @@ pixelift/
 ├── core/                ── no GTK imports anywhere in here ──
 │   ├── upscaler.py      Upscaler ABC + TorchUpscaler (tiling, OOM recovery, CPU fallback)
 │   ├── tiling.py        tile layout + seam feathering (pure numpy)
-│   ├── image_processor.py  load → lighting → upscale → restore alpha/mode → save (one image)
+│   ├── image_processor.py  load → lighting → look → upscale → look finish → save (one image)
 │   ├── lighting.py      lighting profiles and adjustments (pure numpy)
+│   ├── camera_looks.py  camera looks: recipes, 3D-LUT grade, grain (numpy + Pillow)
 │   ├── restoration/     AI photo restoration (no GTK)
 │   │   ├── settings.py     levels, presets, stages, file-name tag (no PyTorch)
 │   │   ├── analysis.py     B&W detection, noise and levels measurement (no PyTorch)
@@ -415,6 +477,11 @@ engine could be reused from another front-end (e.g. Rust) or replaced.
 **Adding a lighting profile:** call `register_profile(LightingProfile(...))` in
 `pixelift/core/lighting.py`; the app, settings and CLI list every registered
 profile.
+
+**Adding a camera look:** call `register_look(CameraLook(...))` in
+`pixelift/core/camera_looks.py` with a `LookRecipe` (lighting adjustments plus
+roll-off, fade, colour bands, toning, clarity, sharpening, grain, skin
+protection); the gallery, settings and CLI list every registered look.
 
 **Adding a restoration stage:** add a function to `core/restoration/` that
 takes and returns an RGB `uint8` array, call it from `Restorer.restore` at the

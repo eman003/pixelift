@@ -9,14 +9,17 @@ Stage order (chosen so each step works on the cleanest possible input):
 4. Faded-image recovery and colour-cast correction.
 5. Colorization (only with consent, only black-and-white photos) — after
    cleanup, so the network sees a clean, well-exposed photo.
-6. Manual colour correction, Modern Finish and the lighting profile — at the
-   input resolution (cheap), so the AI upscaler builds on the final tones,
-   as in normal upscaling.
+6. Manual colour correction, Modern Finish, the lighting profile and the
+   camera look — at the input resolution (cheap), so the AI upscaler builds
+   on the final tones, as in normal upscaling. The camera look comes after
+   colorization, so its colour rendering never steers the colorizer.
 7. AI upscaling (or AI detail reconstruction without upscaling) with
    Real-ESRGAN, blended with a conventional resize according to fidelity.
 8. Face restoration at the output resolution: GFPGAN's 512 px faces keep
    their detail instead of being shrunk and re-upscaled.
 9. Sharpening at the output resolution.
+10. The camera look's finish (its sharpening and film grain) on the final
+    image, so neither the upscaler nor face restoration smooths the grain.
 
 Models are loaded once by the shared :class:`TorchUpscaler` and reused for
 every image; nothing ever leaves the computer.
@@ -31,6 +34,8 @@ from typing import ClassVar
 
 import numpy as np
 
+from pixelift.core import camera_looks
+from pixelift.core.camera_looks import LookRecipe
 from pixelift.core.control import JobControl
 from pixelift.core.errors import ModelNotInstalledError, UpscalerError
 from pixelift.core.lighting import Adjustments
@@ -115,6 +120,8 @@ class Restorer:
         *,
         model: str,
         lighting: Adjustments | None = None,
+        look: LookRecipe | None = None,
+        look_output: tuple[int, int] | None = None,
         mono: MonoInfo | None = None,
         source_grayscale: bool = False,
         progress: Progress | None = None,
@@ -123,11 +130,15 @@ class Restorer:
         """Restore ``rgb`` (H, W, 3 uint8). The input array is not modified.
 
         ``model`` is the upscaling model family used for upscaling and AI
-        detail reconstruction; ``lighting`` the lighting profile's adjustments.
+        detail reconstruction; ``lighting`` the lighting profile's adjustments
+        and ``look`` the camera look's recipe. ``look_output`` is the final
+        export size when this is a reduced preview of it (so the look's grain
+        and sharpening look as they will in the export).
         """
         settings.validate()
         report = progress or (lambda _f, _s: None)
         lighting = lighting or Adjustments()
+        look = look or LookRecipe()
         stages = settings.stages()
 
         def check() -> None:
@@ -140,7 +151,7 @@ class Restorer:
         colorize_now = monochrome and settings.colorize and settings.colorize_strength > 0
         self.check_models(settings, monochrome)
 
-        plan = _Plan(settings, stages, colorize_now, lighting, monochrome)
+        plan = _Plan(settings, stages, colorize_now, monochrome, look)
         image = rgb
         # Neutral grey from here on? (Then it is saved as a greyscale image.)
         gray = monochrome and _is_neutral(rgb)
@@ -186,13 +197,19 @@ class Restorer:
         finish = (
             tones.MODERN_FINISHES.get(settings.modern) if settings.modern != MODERN_OFF else None
         )
-        if not settings.color.is_neutral or finish or not lighting.is_neutral:
+        if (
+            not settings.color.is_neutral
+            or finish
+            or not lighting.is_neutral
+            or not look.grade_neutral
+        ):
             report(plan.at("look"), "Adjusting colour and lighting")
             image = tones.adjust(image, settings.color)
             if finish is not None:
                 image = tones.adjust(image, finish.adjustments)
                 image = cleanup.clarity(image, finish.clarity, control)
             image = tones.adjust(image, lighting)
+            image = camera_looks.apply_look(image, look)
         check()
 
         if settings.ai_scale():
@@ -212,10 +229,14 @@ class Restorer:
             report(plan.at("sharpen"), "Enhancing detail")
             out_noise = estimate_noise(image)
             image = cleanup.sharpen(image, stages.sharpness, out_noise, control)
+        if not look.finish_neutral:
+            report(plan.at("finish"), "Finishing camera look")
+            image = camera_looks.finish_look(image, look, output=look_output)
 
         if image is rgb:
             image = rgb.copy()
         still_gray = gray and not colorize_now and not lighting.changes_colour
+        still_gray = still_gray and not look.changes_colour
         still_gray = still_gray and settings.color.temperature == 0 and settings.color.tint == 0
         return RestoreResult(image, still_gray, colorize_now, face_report)
 
@@ -376,6 +397,7 @@ class _Plan:
         "upscale": 0.5,
         "faces": 0.2,
         "sharpen": 0.03,
+        "finish": 0.02,
     }
 
     def __init__(
@@ -383,8 +405,8 @@ class _Plan:
         settings: RestorationSettings,
         stages: object,
         colorize_now: bool,
-        lighting: Adjustments,
         monochrome: bool,
+        look: LookRecipe,
     ) -> None:
         s = stages
         active = {
@@ -398,6 +420,7 @@ class _Plan:
             "upscale": settings.scale > 1 or bool(s.detail),  # type: ignore[attr-defined]
             "faces": s.face != FACE_OFF,  # type: ignore[attr-defined]
             "sharpen": bool(s.sharpness),  # type: ignore[attr-defined]
+            "finish": not look.finish_neutral,
         }
         total = sum(w for k, w in self.WEIGHTS.items() if active[k]) or 1.0
         self._start: dict[str, float] = {}

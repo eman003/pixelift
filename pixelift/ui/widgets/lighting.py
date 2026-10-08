@@ -39,13 +39,61 @@ def _slider(low: int, high: int) -> Gtk.Scale:
     return scale
 
 
-class LightingControls(Gtk.Box):
-    def __init__(self, app: UpscalerApplication, label_width: int = 6) -> None:
-        super().__init__(spacing=8)
+class LiveSettingsBox(Gtk.Box):
+    """Controls that edit the look settings live (lighting, camera look).
+
+    Changes notify the application's lighting listeners (live previews,
+    stale results) and are saved — at once, or debounced during drags.
+    """
+
+    def __init__(self, app: UpscalerApplication, **kwargs: object) -> None:
+        super().__init__(**kwargs)
         self.app = app
         self._syncing = False
         self._notify_source = 0
         self._save_source = 0
+
+    def _save(self, now: bool = False) -> None:
+        """Notify lighting listeners and save, at once or debounced."""
+        self._cancel_pending()
+        if now:
+            self.app.lighting_changed()
+            self.app.save_settings()
+            return
+
+        def notify() -> bool:
+            self._notify_source = 0
+            self.app.lighting_changed()
+            return GLib.SOURCE_REMOVE
+
+        def save() -> bool:
+            self._save_source = 0
+            self.app.save_settings()
+            return GLib.SOURCE_REMOVE
+
+        self._notify_source = GLib.timeout_add(NOTIFY_DELAY_MS, notify)
+        self._save_source = GLib.timeout_add(SAVE_DELAY_MS, save)
+
+    def _cancel_pending(self) -> tuple[bool, bool]:
+        """Remove pending notify/save timeouts; returns which were pending."""
+        pending = (bool(self._notify_source), bool(self._save_source))
+        for source in (self._notify_source, self._save_source):
+            if source:
+                GLib.source_remove(source)
+        self._notify_source = self._save_source = 0
+        return pending
+
+    def _flush_pending(self) -> None:
+        notify, save = self._cancel_pending()
+        if notify:
+            self.app.lighting_changed()
+        if save:
+            self.app.save_settings()
+
+
+class LightingControls(LiveSettingsBox):
+    def __init__(self, app: UpscalerApplication, label_width: int = 6) -> None:
+        super().__init__(app, spacing=8)
         self._profiles = lighting.all_profiles()
 
         title = Gtk.Label(label="Lighting", xalign=0, width_chars=label_width)
@@ -178,41 +226,7 @@ class LightingControls(Gtk.Box):
             setattr(self.app.settings, f"lighting_{name}", 0)
         self._save(now=True)
 
-    def _save(self, now: bool = False) -> None:
-        """Notify lighting listeners and save, at once or debounced."""
-        self._cancel_pending()
-        if now:
-            self.app.lighting_changed()
-            self.app.save_settings()
-            return
-
-        def notify() -> bool:
-            self._notify_source = 0
-            self.app.lighting_changed()
-            return GLib.SOURCE_REMOVE
-
-        def save() -> bool:
-            self._save_source = 0
-            self.app.save_settings()
-            return GLib.SOURCE_REMOVE
-
-        self._notify_source = GLib.timeout_add(NOTIFY_DELAY_MS, notify)
-        self._save_source = GLib.timeout_add(SAVE_DELAY_MS, save)
-
-    def _cancel_pending(self) -> tuple[bool, bool]:
-        """Remove pending notify/save timeouts; returns which were pending."""
-        pending = (bool(self._notify_source), bool(self._save_source))
-        for source in (self._notify_source, self._save_source):
-            if source:
-                GLib.source_remove(source)
-        self._notify_source = self._save_source = 0
-        return pending
-
     def shutdown(self) -> None:
         """Flush pending changes and stop listening (when the window closes)."""
-        notify, save = self._cancel_pending()
-        if notify:
-            self.app.lighting_changed()
-        if save:
-            self.app.save_settings()
+        self._flush_pending()
         self.app.off_lighting_changed(self.sync)

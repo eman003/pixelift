@@ -212,3 +212,123 @@ def test_black_and_white_banner_and_row(tmp_path):
     assert label.startswith("40×30 · ") and label.endswith("→  40×30 · B&W")
     row.set_scale(4, show_monochrome=False)
     assert "B&W" not in row.details.get_label()
+
+
+def test_camera_look_controls_follow_and_update_settings():
+    from pixelift.core import camera_looks as cl
+    from pixelift.ui.widgets.camera_looks import CameraLookControls
+
+    app = _StubApp()
+    controls = CameraLookControls(app)
+    # Defaults: Original at 50%, nothing to reset, intensity and grain not applicable.
+    assert controls.look_label.get_label() == "Original"
+    assert not controls.reset_btn.get_visible() and not controls.intensity_box.get_sensitive()
+    assert not controls.custom_btn.get_visible() and not controls.favorite_btn.get_visible()
+    assert len(controls.cards) == len(cl.all_looks())
+
+    controls.select("fujifilm-provia")
+    assert app.settings.camera_look == "fujifilm-provia" and app.saves == 1
+    assert controls.look_label.get_label() == "Fujifilm Provia"
+    assert controls.cards["fujifilm-provia"].has_css_class("selected-look")
+    assert controls.intensity_box.get_sensitive() and controls.reset_btn.get_visible()
+    # A drag updates the value (and the gallery's slider) at once, but notifies
+    # and saves only later.
+    notifies = app.notifies
+    for value in (60, 70, 80):
+        controls.intensity.set_value(value)
+    assert app.settings.camera_look_intensity == 80
+    assert controls.gallery_intensity.get_value() == 80
+    assert app.notifies == notifies
+    controls.grain_dd.set_selected(cl.GRAIN_CHOICES.index("medium"))
+    assert app.settings.camera_look_grain == "medium"
+    controls.reset()
+    assert (app.settings.camera_look, app.settings.camera_look_intensity) == ("original", 50)
+    assert app.settings.camera_look_grain == cl.GRAIN_AUTO
+    controls.shutdown()
+    assert controls.sync not in app.listeners
+
+
+def test_camera_look_favorites_and_categories():
+    from pixelift.ui.widgets.camera_looks import CameraLookControls
+
+    app = _StubApp()
+    controls = CameraLookControls(app)
+    controls.select("portra")
+    controls.favorite_btn.set_active(True)
+    assert app.settings.camera_look_favorites == ["portra"]
+    assert controls.cards["portra"].star.get_active()
+    controls.cards["kodak"].star.set_active(True)
+    assert app.settings.camera_look_favorites == ["portra", "kodak"]
+
+    def visible():
+        return [k for k, card in controls.cards.items() if controls._card_visible(card)]
+
+    controls.filter_buttons["favorites"].set_active(True)
+    assert visible() == ["kodak", "portra"]
+    controls.filter_buttons["monochrome"].set_active(True)
+    assert visible() == ["leica-monochrome", "black-white"]
+    controls.filter_buttons["saved"].set_active(True)
+    assert visible() == [] and controls.empty_label.get_visible()
+    controls.filter_buttons["all"].set_active(True)
+    assert len(visible()) == len(controls.cards)
+    controls.cards["portra"].star.set_active(False)
+    assert app.settings.camera_look_favorites == ["kodak"]
+    controls.shutdown()
+
+
+def test_camera_look_custom_save_and_delete():
+    from pixelift.core import camera_looks as cl
+    from pixelift.ui.widgets.camera_looks import CameraLookControls, _render_thumbnails
+
+    app = _StubApp()
+    app.settings.camera_look = cl.CUSTOM
+    app.settings.look_contrast = 25
+    controls = CameraLookControls(app)
+    assert controls.custom_btn.get_visible() and not controls.intensity_box.get_visible()
+    assert controls.custom_sliders["contrast"].get_value() == 25
+    controls.custom_sliders["green"].set_value(30)
+    assert app.settings.look_green == 30
+    controls.save_entry.set_text("Lush")
+    controls.save_custom()
+    assert app.settings.camera_look == "user:Lush"
+    assert app.settings.camera_look_saved["Lush"]["green"] == 30
+    assert "user:Lush" in controls.cards and controls.look_label.get_label() == "Lush"
+    assert app.settings.camera_look_settings().active
+    thumbs = _render_thumbnails(cl.sample_image(), controls._card_recipes())
+    assert set(thumbs) == set(controls.cards)
+    controls.delete_saved("user:Lush")
+    assert app.settings.camera_look == cl.ORIGINAL and "user:Lush" not in controls.cards
+    controls.reset_custom()
+    assert all(s.get_value() == 0 for s in controls.custom_sliders.values())
+    controls.shutdown()
+
+
+def test_saved_look_opens_at_full_strength_and_refreshes_its_card():
+    from pixelift.core import camera_looks as cl
+    from pixelift.ui.widgets.camera_looks import CameraLookControls
+
+    app = _StubApp()
+    app.settings.camera_look = cl.CUSTOM
+    app.settings.look_contrast = 30
+    controls = CameraLookControls(app)
+    assert app.settings.camera_look_intensity == 50
+    designed = app.settings.camera_look_settings().recipe()
+    controls.save_entry.set_text("Punchy")
+    controls.save_custom()
+    # Saving keeps exactly what was designed: no silent halving.
+    assert app.settings.camera_look_intensity == 100
+    assert app.settings.camera_look_settings().recipe().tone == designed.tone
+    # Replacing a saved look re-renders its card.
+    controls._thumbs_stale = False
+    controls.select(cl.CUSTOM)
+    controls.custom_sliders["contrast"].set_value(60)
+    controls.save_entry.set_text("Punchy")
+    controls.save_custom()
+    assert controls._thumbs_stale or controls._thumb_generation > 0
+    assert app.settings.camera_look_saved["Punchy"]["contrast"] == 60
+    # Choosing a saved card also opens it at full strength.
+    controls.select("kodak")
+    controls.intensity.set_value(30)
+    controls.select("user:Punchy")
+    assert app.settings.camera_look_intensity == 100
+    controls.shutdown()

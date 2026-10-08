@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import string
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -204,12 +204,21 @@ _FIELD_RE = re.compile(r"[\\/\x00]")
 
 
 def render_filename(
-    template: str, source: Path, scale: int, model: str, width: int, height: int, ext: str
+    template: str,
+    source: Path,
+    scale: int,
+    model: str,
+    width: int,
+    height: int,
+    ext: str,
+    lighting: str = "",
 ) -> str:
     """Expand a filename template such as ``{name}_{scale}x`` and append ``ext``.
 
-    Fields: {name} {ext} {scale} {model} {width} {height}. Unknown fields raise
-    ValueError so typos are caught when the setting is changed.
+    Fields: {name} {ext} {scale} {model} {width} {height} {lighting}. Unknown
+    fields raise ValueError so typos are caught when the setting is changed.
+    A non-empty ``lighting`` tag the template does not place is appended as
+    ``_<tag>``, so differently lit results never share a name.
     """
     template = template.strip() or DEFAULT_TEMPLATE
     values = {
@@ -219,23 +228,23 @@ def render_filename(
         "model": model,
         "width": width,
         "height": height,
+        "lighting": lighting,
     }
-    for _, field_name, _, _ in string.Formatter().parse(template):
-        if field_name is not None and field_name not in values:
+    fields = {name for _, name, _, _ in string.Formatter().parse(template) if name is not None}
+    for field_name in fields:
+        if field_name not in values:
             raise ValueError(f"Unknown field {{{field_name}}} in filename template")
+    if lighting and "lighting" not in fields:
+        template += "_{lighting}"
     stem = _FIELD_RE.sub("_", template.format(**values)).strip(". ") or source.stem
     return stem + ext
 
 
-def unique_path(path: Path) -> Path:
-    """``photo.png`` -> ``photo (2).png`` if it already exists."""
-    if not path.exists():
-        return path
+def numbered_paths(path: Path) -> Iterator[Path]:
+    """``photo.png``, ``photo (2).png``, ``photo (3).png``, …"""
+    yield path
     for i in range(2, 10_000):
-        candidate = path.with_name(f"{path.stem} ({i}){path.suffix}")
-        if not candidate.exists():
-            return candidate
-    raise FileExistsError(path)
+        yield path.with_name(f"{path.stem} ({i}){path.suffix}")
 
 
 def human_size(num_bytes: float) -> str:

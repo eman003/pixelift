@@ -38,6 +38,7 @@ class UpscalerApplication(Adw.Application):
         self.device_report: dm.DeviceReport | None = None
         self._device_waiters: list[Callable[[dm.DeviceReport], None]] = []
         self._settings_listeners: list[Callable[[], None]] = []
+        self._lighting_listeners: list[Callable[[], None]] = []
 
     # --- lifecycle ---------------------------------------------------------
     def do_startup(self) -> None:
@@ -108,13 +109,34 @@ class UpscalerApplication(Adw.Application):
     def on_settings_changed(self, listener: Callable[[], None]) -> None:
         self._settings_listeners.append(listener)
 
+    def off_settings_changed(self, listener: Callable[[], None]) -> None:
+        if listener in self._settings_listeners:
+            self._settings_listeners.remove(listener)
+
     def settings_changed(self) -> None:
         log.debug("Settings changed: %s", self.settings)
         self.settings.normalise()
         save_settings(self.settings)
         self.apply_theme()
-        for listener in list(self._settings_listeners):
+        for listener in list(self._settings_listeners) + list(self._lighting_listeners):
             listener()
+
+    def on_lighting_changed(self, listener: Callable[[], None]) -> None:
+        """Called when the lighting values change (also on any settings change)."""
+        self._lighting_listeners.append(listener)
+
+    def off_lighting_changed(self, listener: Callable[[], None]) -> None:
+        if listener in self._lighting_listeners:
+            self._lighting_listeners.remove(listener)
+
+    def lighting_changed(self) -> None:
+        """Notify lighting listeners only, without saving (cheap enough for slider drags)."""
+        self.settings.normalise()
+        for listener in list(self._lighting_listeners):
+            listener()
+
+    def save_settings(self) -> None:
+        save_settings(self.settings)
 
     def apply_theme(self) -> None:
         scheme = {

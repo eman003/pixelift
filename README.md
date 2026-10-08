@@ -20,6 +20,9 @@ super-resolution.
 - Tiled processing for very large images, automatic tile sizing and
   automatic recovery from out-of-memory errors
 - Batch queue with progress, pause / resume / cancel, retry failed, skip completed
+- Lighting profiles (Natural Daylight, Golden Hour, Cinematic, Low Light
+  Recovery and more) or your own custom adjustments, applied before upscaling
+  with a live preview
 - Before/after comparison: slider, toggle, zoom, pan, fit, 100 %
 - Keeps EXIF orientation (no accidental rotation), EXIF metadata, ICC colour
   profiles, DPI, transparency and grayscale
@@ -41,7 +44,7 @@ super-resolution.
 ### Option A — `.deb` package (Ubuntu 24.04)
 
 ```bash
-sudo apt install ./pixelift_1.0.0_amd64.deb
+sudo apt install ./pixelift_1.1.0_amd64.deb
 ```
 
 Pixelift then appears in the application launcher, and the `pixelift`
@@ -51,9 +54,9 @@ PyTorch; GPU support is an optional extra step (below).
 ### Option B — AppImage
 
 ```bash
-chmod +x Pixelift-1.0.0-x86_64.AppImage
-./Pixelift-1.0.0-x86_64.AppImage            # desktop app
-./Pixelift-1.0.0-x86_64.AppImage photo.jpg  # CLI
+chmod +x Pixelift-1.1.0-x86_64.AppImage
+./Pixelift-1.1.0-x86_64.AppImage            # desktop app
+./Pixelift-1.1.0-x86_64.AppImage photo.jpg  # CLI
 ```
 
 The AppImage bundles the app, PyTorch, numpy and Pillow, and uses the system's
@@ -129,7 +132,8 @@ Models are stored in `~/.local/share/pixelift/models/` (override with
 ### Desktop app
 
 1. Drop images or folders onto the window (or click **Select Images**, Ctrl+O).
-2. Choose **Scale**, **Model**, **Format** and **Output** folder in the bottom bar.
+2. Choose **Scale**, **Model**, **Format** and **Output** folder in the bottom
+   bar, and optionally a **Lighting** profile (see [Lighting](#lighting)).
 3. Click **Start Upscaling**. Use **Pause**, **Resume**, **Cancel** and
    **Retry Failed** as needed. Images whose result already exists are skipped.
 4. Click an image (or its compare button) to open the before/after view:
@@ -138,7 +142,42 @@ Models are stored in `~/.local/share/pixelift/models/` (override with
 
 Results go to `<original folder>/upscaled/` by default, named with the template
 `{name}_{scale}x` (e.g. `photo.jpg → photo_4x.png`). Template fields: `{name}`,
-`{scale}`, `{model}`, `{width}`, `{height}`, `{ext}`.
+`{scale}`, `{model}`, `{width}`, `{height}`, `{ext}`, `{lighting}`.
+
+When several images in one batch would get the same output name (e.g.
+`photo.jpg` and `photo.png`), the one earlier in the queue gets `photo_4x.png`
+and the next `photo_4x (2).png` — the same way on every run.
+
+### Lighting
+
+Lighting profiles adjust tone and colour **before** the AI model runs, so the
+model reconstructs detail from the corrected image. Pick a profile in the
+bottom bar or in the preview window of an image that is not upscaled yet; the
+preview's right-hand side shows the result live.
+
+| Profile | Effect |
+|---|---|
+| Original | No adjustment (default) |
+| Natural Daylight | Balanced exposure and neutral colours |
+| Bright & Clean | A brighter image with lifted shadows |
+| Golden Hour | Warmer tones and softer highlights |
+| Studio | Clean, bright lighting with controlled shadows |
+| Cinematic | Deeper shadows, controlled highlights, stronger contrast |
+| Low Light Recovery | Brighten dark areas while protecting highlights |
+| Cool Daylight | Cooler temperature with crisp contrast |
+| Vivid | Stronger colours and contrast |
+| High Contrast | Dramatic highlights and shadows |
+| Custom | Your own exposure, brightness, contrast, highlights, shadows, temperature, tint and saturation |
+
+*Intensity* (0–100 %) scales a profile; 0 % is the original image.
+
+The lighting is part of the output name — `photo_4x_golden-hour.png`,
+`photo_4x_golden-hour-50.png` at 50 %, `photo_4x_custom-1a2b3c.png` for Custom
+(Original adds nothing) — so results made with different lighting never
+overwrite or get mistaken for each other. Put `{lighting}` in the filename
+template to place it yourself. Changing the lighting puts finished images back
+in the queue; their earlier results stay on disk. A grayscale image stays
+grayscale unless the profile warms, cools or tints it.
 
 ### Command line
 
@@ -149,6 +188,8 @@ pixelift ./photos \
     --scale 4 \
     --model realesrgan \
     --output ./upscaled
+
+pixelift portrait.jpg --lighting golden-hour --lighting-intensity 60
 ```
 
 | Option | Meaning |
@@ -161,6 +202,8 @@ pixelift ./photos \
 | `--quality 1-100` | JPEG/WebP quality |
 | `--tile-size SIZE` | Tile size in px (`0` = automatic) |
 | `--template TEMPLATE` | Output filename template |
+| `-l`, `--lighting PROFILE` | Lighting profile id, e.g. `golden-hour`; `custom` uses the values set in the app |
+| `--lighting-intensity 0-100` | Profile strength (not used with `custom`) |
 | `--overwrite` / `--rename` | What to do if the output exists (default: skip) |
 | `--no-metadata` | Don't copy EXIF/ICC |
 | `--threads N` | CPU threads |
@@ -239,7 +282,8 @@ pixelift/
 ├── core/                ── no GTK imports anywhere in here ──
 │   ├── upscaler.py      Upscaler ABC + TorchUpscaler (tiling, OOM recovery, CPU fallback)
 │   ├── tiling.py        tile layout + seam feathering (pure numpy)
-│   ├── image_processor.py  load → upscale → restore alpha/mode → save (one image)
+│   ├── image_processor.py  load → lighting → upscale → restore alpha/mode → save (one image)
+│   ├── lighting.py      lighting profiles and adjustments (pure numpy)
 │   ├── batch_processor.py  bounded worker pool, pause/resume/cancel, events
 │   ├── device_manager.py   CUDA / ROCm / XPU / CPU detection
 │   ├── model_manager.py    download, checksum, install, remove
@@ -254,6 +298,10 @@ pixelift/
 The UI only talks to `core` through `Upscaler`, `BatchProcessor` (events are
 marshalled to the main loop with `GLib.idle_add`) and `ModelManager`, so the
 engine could be reused from another front-end (e.g. Rust) or replaced.
+
+**Adding a lighting profile:** call `register_profile(LightingProfile(...))` in
+`pixelift/core/lighting.py`; the app, settings and CLI list every registered
+profile.
 
 **Adding a model:** implement the network (or reuse `RRDBNet` /
 `SRVGGNetCompact`), create `ModelSpec`s with URL, SHA-256 and license in a new

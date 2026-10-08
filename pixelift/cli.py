@@ -12,12 +12,23 @@ from pixelift.core import device_manager as dm
 from pixelift.core.batch_processor import BatchEvent, BatchProcessor, EventKind, QueueItem
 from pixelift.core.control import JobControl
 from pixelift.core.errors import CancelledError, UpscalerError, friendly_error
+from pixelift.core.lighting import all_profiles, get_profile
 from pixelift.core.model_manager import ModelManager
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
 from pixelift.storage.settings import load_settings
 from pixelift.utils.image_utils import OUTPUT_FORMATS, collect_images, human_size
 from pixelift.utils.logging import setup_logging
+
+
+def _percent(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid percentage: {text!r}") from None
+    if not 0 <= value <= 100:
+        raise argparse.ArgumentTypeError(f"must be between 0 and 100, not {value}")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,7 +76,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--template",
         default=settings.filename_template,
         help="output filename template, fields: {name} {scale} {model} "
-        "{width} {height} {ext} (default: %(default)s)",
+        "{width} {height} {ext} {lighting} (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-l",
+        "--lighting",
+        choices=[p.id for p in all_profiles()],
+        default=settings.lighting_profile,
+        help="lighting profile applied before upscaling; 'custom' uses the values "
+        "set in the app (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--lighting-intensity",
+        type=_percent,
+        metavar="PERCENT",
+        help="lighting profile strength 0-100; not used with 'custom' "
+        f"(default: {settings.lighting_intensity})",
     )
     existing = parser.add_mutually_exclusive_group()
     existing.add_argument("--overwrite", action="store_const", const="overwrite", dest="existing")
@@ -188,7 +214,10 @@ def _download(manager: ModelManager, ids: list[str]) -> int:
 
 
 def run_cli(argv: list[str]) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.lighting == "custom" and args.lighting_intensity is not None:
+        parser.error("--lighting-intensity does not apply to --lighting custom")
     log_path = setup_logging(args.verbose, console=args.verbose)
     manager = ModelManager()
 
@@ -220,7 +249,7 @@ def run_cli(argv: list[str]) -> int:
     if args.download_model:
         return _download(manager, args.download_model)
     if not args.inputs:
-        build_parser().print_usage(sys.stderr)
+        parser.print_usage(sys.stderr)
         return 2
 
     images = collect_images(args.inputs, recursive=not args.no_recursive)
@@ -241,6 +270,10 @@ def run_cli(argv: list[str]) -> int:
     options.filename_template = args.template
     options.existing = args.existing
     options.preserve_metadata = not args.no_metadata
+    settings.lighting_profile = args.lighting
+    if args.lighting_intensity is not None:
+        settings.lighting_intensity = args.lighting_intensity
+    options.lighting = settings.normalise().lighting()
     try:
         options.validate()
         manager.resolve(options.model, options.scale)
@@ -253,9 +286,15 @@ def run_cli(argv: list[str]) -> int:
 
     device = dm.resolve_device(args.device, gpu_enabled=settings.gpu_enabled)
     print(f"Processing device: {device.label()}")
+    lighting = ""
+    if options.lighting.active:
+        name = get_profile(options.lighting.profile).name
+        lighting = f" · lighting {name}"
+        if options.lighting.profile != "custom":
+            lighting += f" {options.lighting.intensity}%"
     print(
         f"{len(images)} image(s) · {options.scale}× · model {options.model} · "
-        f"{options.output_format.upper()}"
+        f"{options.output_format.upper()}{lighting}"
     )
     printer = _Printer(len(images))
     holder: dict[str, BatchProcessor] = {}

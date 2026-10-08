@@ -48,6 +48,18 @@ TileProgress = Callable[[int, int], None]  # (tiles_done, tiles_total)
 CPU_TILE_CAP = 512
 DEFAULT_OVERLAP = 32
 
+# CUDA devices whose per-process memory fraction we lowered. The setting is
+# process-wide, so it must be undone explicitly when the limit is removed.
+_limited_cuda_devices: set[str] = set()
+
+
+def _uses_half(device: dm.DeviceInfo) -> bool:
+    return device.kind in ("cuda", "xpu")
+
+
+class _DeviceChangedError(Exception):
+    """The upscaler moved to another device before an attempt could start."""
+
 
 class Upscaler(ABC):
     """Upscale an RGB ``uint8`` array of shape (H, W, 3)."""
@@ -106,20 +118,32 @@ class TorchUpscaler(Upscaler):
 
     @property
     def half(self) -> bool:
-        return self.device.kind in ("cuda", "xpu")
+        return _uses_half(self.device)
 
     def _apply_memory_limit(self) -> None:
-        if self.device.kind != "cuda" or self.memory_limit_mb <= 0 or not self.device.total_memory:
+        if self.device.kind != "cuda":
             return
         import torch
 
+        device_id = self.device.id
+        if self.memory_limit_mb <= 0 or not self.device.total_memory:
+            if device_id in _limited_cuda_devices:
+                torch.cuda.set_per_process_memory_fraction(1.0, torch.device(device_id))
+                _limited_cuda_devices.discard(device_id)
+                log.info("Removed the memory limit on %s", device_id)
+            return
         fraction = min(1.0, self.memory_limit_mb * 1024**2 / self.device.total_memory)
-        torch.cuda.set_per_process_memory_fraction(fraction, torch.device(self.device.id))
-        log.info("Limiting %s to %.0f%% of its memory", self.device.id, fraction * 100)
+        torch.cuda.set_per_process_memory_fraction(fraction, torch.device(device_id))
+        _limited_cuda_devices.add(device_id)
+        log.info("Limiting %s to %.0f%% of its memory", device_id, fraction * 100)
 
     # --- model loading -----------------------------------------------------
     def load(self, spec: ModelSpec) -> nn.Module:
-        """Load ``spec`` onto the device once; later calls reuse it."""
+        """Load ``spec`` onto the device once; later calls reuse it.
+
+        Cached networks always live on ``self.device``: ``_switch_to_cpu``
+        clears the cache under the same lock when it changes the device.
+        """
         import torch
 
         with self._lock:
@@ -159,8 +183,10 @@ class TorchUpscaler(Upscaler):
         gc.collect()
         dm.empty_cache(self.device)
 
-    def _switch_to_cpu(self, reason: str) -> None:
+    def _switch_to_cpu(self, failed: dm.DeviceInfo, reason: str) -> None:
         with self._lock:
+            if self.device != failed:
+                return  # another job already switched away from this device
             log.warning("Falling back to CPU: %s", reason)
             self._nets.clear()
             dm.empty_cache(self.device)
@@ -169,15 +195,17 @@ class TorchUpscaler(Upscaler):
             self.on_device_change(self.device, reason)
 
     # --- inference ---------------------------------------------------------
-    def choose_tile_size(self, spec: ModelSpec, height: int, width: int) -> int:
+    def choose_tile_size(
+        self, spec: ModelSpec, height: int, width: int, device: dm.DeviceInfo
+    ) -> int:
         if self.tile_size > 0:
             return self.tile_size
-        bytes_per_px = spec.memory_per_pixel * (0.5 if self.half else 1.0)
-        if self.device.is_gpu:
-            budget = int(dm.free_memory(self.device) * 0.6)
+        bytes_per_px = spec.memory_per_pixel * (0.5 if _uses_half(device) else 1.0)
+        if device.is_gpu:
+            budget = int(dm.free_memory(device) * 0.6)
             cap = 1024
         else:
-            budget = int(min(dm.free_memory(self.device) * 0.3, 3 * 1024**3))
+            budget = int(min(dm.free_memory(device) * 0.3, 3 * 1024**3))
             cap = CPU_TILE_CAP
         return auto_tile_size(height, width, bytes_per_px, budget, cap)
 
@@ -204,30 +232,41 @@ class TorchUpscaler(Upscaler):
                 ["Use 2× instead of 4×", "Close other applications"],
             ) from exc
 
-        tile = self.choose_tile_size(spec, height, width)
+        tile = 0
+        tile_device: dm.DeviceInfo | None = None
         while True:
+            # Other jobs share this upscaler and may switch it to the CPU at any
+            # moment, so each attempt uses one consistent device + network pair,
+            # with a tile sized for that device.
+            with self._lock:
+                device = self.device
+            if device != tile_device:
+                tile = self.choose_tile_size(spec, height, width, device)
+                tile_device = device
             try:
-                self._run_tiled(spec, image, out, scale, tile, progress, control)
+                self._run_tiled(spec, device, image, out, scale, tile, progress, control)
                 return out
+            except _DeviceChangedError:
+                continue
             except Exception as exc:
-                if not self.device.is_gpu and not is_oom(exc):
+                if not device.is_gpu and not is_oom(exc):
                     raise
                 if is_oom(exc):
                     gc.collect()
-                    dm.empty_cache(self.device)
+                    dm.empty_cache(device)
                     if tile > MIN_TILE:
                         new_tile = smaller_tile(tile)
                         log.warning("Out of memory at tile %d; retrying with %d", tile, new_tile)
                         tile = new_tile
                         continue
-                    if not self.device.is_gpu:
+                    if not device.is_gpu:
                         raise OutOfMemoryError(
                             "The computer ran out of memory even with the smallest tile size.",
                             ["Close other applications", "Use a smaller image"],
                         ) from exc
                     if not self.cpu_fallback:
                         raise gpu_oom_error() from exc
-                    self._switch_to_cpu("GPU ran out of memory")
+                    self._switch_to_cpu(device, "GPU ran out of memory")
                 elif not isinstance(exc, (UpscalerError, CancelledError)):
                     # Driver / kernel / runtime failures on the GPU (not OOM).
                     log.exception("GPU inference failed")
@@ -236,17 +275,17 @@ class TorchUpscaler(Upscaler):
                             f"The GPU reported an error: {str(exc).splitlines()[0][:200]}",
                             ["Switch the processing device to CPU in Settings"],
                         ) from exc
-                    self._switch_to_cpu("GPU error")
+                    self._switch_to_cpu(device, "GPU error")
                 else:
                     raise
-                tile = self.choose_tile_size(spec, height, width)
             finally:
-                if self.device.is_gpu:
-                    dm.empty_cache(self.device)
+                if device.is_gpu:
+                    dm.empty_cache(device)
 
     def _run_tiled(
         self,
         spec: ModelSpec,
+        device: dm.DeviceInfo,
         image: np.ndarray,
         out: np.ndarray,
         scale: int,
@@ -254,7 +293,11 @@ class TorchUpscaler(Upscaler):
         progress: TileProgress | None,
         control: JobControl | None,
     ) -> None:
-        net = self.load(spec)
+        with self._lock:
+            if self.device != device:
+                # Switched to the CPU since this attempt began: let upscale() retry.
+                raise _DeviceChangedError
+            net = self.load(spec)
         height, width = image.shape[:2]
         overlap = 0 if tile >= max(height, width) else min(DEFAULT_OVERLAP, tile // 4)
         tiles = plan_tiles(height, width, tile, overlap)
@@ -264,7 +307,7 @@ class TorchUpscaler(Upscaler):
         for done, t in enumerate(tiles, start=1):
             if control is not None:
                 control.check()
-            patch = self._infer(net, spec, image[t.y0 : t.y1, t.x0 : t.x1], scale)
+            patch = self._infer(net, device, spec, image[t.y0 : t.y1, t.x0 : t.x1], scale)
             paste_tile(
                 out,
                 patch,
@@ -277,16 +320,17 @@ class TorchUpscaler(Upscaler):
             if progress:
                 progress(done, len(tiles))
 
-    def _infer(self, net: nn.Module, spec: ModelSpec, patch: np.ndarray, scale: int) -> np.ndarray:
+    def _infer(
+        self, net: nn.Module, device: dm.DeviceInfo, spec: ModelSpec, patch: np.ndarray, scale: int
+    ) -> np.ndarray:
         import torch
         import torch.nn.functional as F  # noqa: N812
 
         th, tw = patch.shape[:2]
         native = spec.native_scale
-        device = dm.to_torch(self.device)
-        dtype = torch.float16 if self.half else torch.float32
+        dtype = torch.float16 if _uses_half(device) else torch.float32
         with torch.inference_mode():
-            x = torch.from_numpy(np.ascontiguousarray(patch)).to(device)
+            x = torch.from_numpy(np.ascontiguousarray(patch)).to(dm.to_torch(device))
             x = x.permute(2, 0, 1).unsqueeze(0).to(dtype).div_(255.0)
             pad_h = -th % spec.size_multiple
             pad_w = -tw % spec.size_multiple

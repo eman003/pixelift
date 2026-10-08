@@ -7,12 +7,13 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from pixelift.core.errors import ImageTooLargeError, InvalidImageError
+from pixelift.core.errors import ImageTooLargeError, InvalidImageError, OutputError
 from pixelift.core.image_processor import (
     ProcessingOptions,
     check_feasible,
     output_path_for,
     process_image,
+    reserve_output,
 )
 from pixelift.utils import image_utils as iu
 
@@ -209,6 +210,11 @@ def test_filename_template():
     assert iu.render_filename("a/{name}", src, 4, "m", 1, 1, ".png") == "a_photo.png"
     with pytest.raises(ValueError, match="Unknown field"):
         iu.render_filename("{nme}", src, 4, "m", 1, 1, ".png")
+    # A lighting tag is appended unless the template places it.
+    assert iu.render_filename("", src, 4, "m", 1, 1, ".png", "vivid") == "photo_4x_vivid.png"
+    assert iu.render_filename("{lighting}-{name}", src, 4, "m", 1, 1, ".png", "vivid") == (
+        "vivid-photo.png"
+    )
 
 
 def test_output_path_default_and_custom(tmp_path):
@@ -234,11 +240,16 @@ def test_existing_policies(image_factory, upscaler, tiny_specs):
     assert over.output == first.output and not over.skipped
 
 
-def test_unique_path(tmp_path):
+def test_reserve_output(tmp_path):
     target = tmp_path / "a.png"
-    assert iu.unique_path(target) == target
+    assert reserve_output(target, "rename", None) == target
     target.write_bytes(b"x")
-    assert iu.unique_path(target).name == "a (2).png"
+    assert reserve_output(target, "rename", None).name == "a (2).png"
+    assert reserve_output(target, "skip", None) == target
+    taken = {target}
+    assert reserve_output(target, "skip", lambda p: p not in taken).name == "a (2).png"
+    with pytest.raises(OutputError):
+        reserve_output(target, "skip", lambda _p: False)
 
 
 def test_webp_dimension_limit_checked_early(tmp_path):

@@ -228,3 +228,74 @@ def test_gpu_upscale(manager):
     up = TorchUpscaler(manager, report.best)
     assert up.upscale(rgb(64, 64), 4, "test-x4").shape == (256, 256, 3)
     assert up.device.is_gpu
+
+
+def test_fallback_by_another_job_does_not_fail_inflight_job(manager):
+    """Job A is mid-image on the GPU when job B switches the shared upscaler to CPU."""
+    fake_gpu = dm.DeviceInfo("cuda:0", "Fake GPU", "CUDA", 4 * 1024**3)
+    up = TorchUpscaler(manager, tile_size=64)
+    up.device = fake_gpu  # pretend; inference below only sees the device we pass
+    seen: list[tuple[str, torch.dtype]] = []
+
+    def fake_infer(net, device, spec, patch, scale):
+        seen.append((device.id, torch.float16 if device.kind == "cuda" else torch.float32))
+        if len(seen) == 1:
+            up._switch_to_cpu(fake_gpu, "GPU error")  # job B falls back mid-tile
+        return np.repeat(np.repeat(patch, scale, 0), scale, 1)
+
+    up._nets["test-x4"] = NearestX4()
+    up._infer = fake_infer
+    out = up.upscale(rgb(130, 130), 4, "test-x4")
+    assert out.shape == (520, 520, 3)
+    # Every tile of this attempt kept the device it started with.
+    assert {d for d, _ in seen} == {"cuda:0"}
+    assert up.device.id == "cpu"
+
+
+def test_switch_to_cpu_is_idempotent(manager):
+    fake_gpu = dm.DeviceInfo("cuda:0", "Fake GPU", "CUDA", 4 * 1024**3)
+    events = []
+    up = TorchUpscaler(manager, on_device_change=lambda dev, why: events.append(why))
+    up.device = fake_gpu
+    up._switch_to_cpu(fake_gpu, "first")
+    up._switch_to_cpu(fake_gpu, "second")
+    assert events == ["first"]
+
+
+def test_memory_limit_reset_when_removed(manager, monkeypatch):
+    from pixelift.core import upscaler as upscaler_mod
+
+    calls = []
+    monkeypatch.setattr(
+        torch.cuda, "set_per_process_memory_fraction", lambda f, d=None: calls.append(f)
+    )
+    monkeypatch.setattr(upscaler_mod, "_limited_cuda_devices", set())
+    gpu = dm.DeviceInfo("cuda:0", "Fake GPU", "CUDA", 4 * 1024**3)
+    TorchUpscaler(manager, gpu, memory_limit_mb=0)
+    assert calls == []  # never limited: leave CUDA alone
+    TorchUpscaler(manager, gpu, memory_limit_mb=1024)
+    assert calls == [0.25]
+    TorchUpscaler(manager, gpu, memory_limit_mb=0)
+    assert calls == [0.25, 1.0]
+
+
+def test_tile_size_follows_the_device_each_attempt_runs_on(manager, monkeypatch):
+    fake_gpu = dm.DeviceInfo("cuda:0", "Fake GPU", "CUDA", 4 * 1024**3)
+    up = TorchUpscaler(manager)
+    up.device = fake_gpu
+    sized_for: list[str] = []
+
+    def choose(spec, height, width, device):
+        sized_for.append(device.id)
+        return 64
+
+    def fake_infer(net, device, spec, patch, scale):
+        if device.is_gpu:
+            raise RuntimeError("driver crashed")  # falls back to the CPU
+        return np.repeat(np.repeat(patch, scale, 0), scale, 1)
+
+    monkeypatch.setattr(up, "choose_tile_size", choose)
+    up._nets["test-x4"] = NearestX4()
+    up._infer = fake_infer
+    assert up.upscale(rgb(100, 100), 4, "test-x4").shape == (400, 400, 3)
+    assert sized_for == ["cuda:0", "cpu"]

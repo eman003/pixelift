@@ -1,4 +1,4 @@
-"""Main window: drop zone, image queue, output options and batch controls."""
+"""Main window: drop zone, image queue, output and lighting options, batch controls."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from pixelift.models import all_families
 from pixelift.ui.async_utils import idle
 from pixelift.ui.image_queue import QueueRow, ThumbnailLoader
 from pixelift.ui.widgets.dialogs import show_error
+from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.utils.image_utils import SUPPORTED_EXTENSIONS, collect_images
 
 if TYPE_CHECKING:
@@ -67,11 +68,13 @@ class MainWindow(Adw.ApplicationWindow):
 
         narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 640sp"))
         narrow.add_setter(self.options_box, "orientation", Gtk.Orientation.VERTICAL)
+        narrow.add_setter(self.lighting, "orientation", Gtk.Orientation.VERTICAL)
         narrow.add_setter(self.buttons_box, "orientation", Gtk.Orientation.VERTICAL)
         self.add_breakpoint(narrow)
 
         self.connect("close-request", self._on_close_request)
         app.on_settings_changed(self._sync_from_settings)
+        app.on_lighting_changed(self._on_lighting_changed)
         app.downloads.subscribe(lambda *_: self._refresh_model_list())
         app.when_devices_ready(self._on_devices)
         self._sync_from_settings()
@@ -197,6 +200,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.options_box.append(self._labeled("Format", self.format_dd))
         self.options_box.append(self._labeled("Output", output_row))
         panel.append(self.options_box)
+        self.lighting = LightingControls(self.app)
+        panel.append(self.lighting)
 
         # Progress area (only while a batch is running / just finished)
         self.progress_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
@@ -278,6 +283,28 @@ class MainWindow(Adw.ApplicationWindow):
             row.set_scale(settings.scale)
         if self.app.device_report:
             self._on_devices(self.app.device_report)
+
+    def _on_lighting_changed(self) -> None:
+        """Results made with other lighting are out of date: queue them again.
+
+        Their files stay on disk (the lighting is part of the file name), so
+        switching back to that lighting just finds and skips them.
+        """
+        if self.running:
+            return
+        tag = self.app.settings.lighting().tag()
+        stale = [
+            r
+            for r in self.rows
+            if r.item.status in (ItemStatus.DONE, ItemStatus.SKIPPED)
+            and r.item.result is not None
+            and r.item.result.lighting != tag
+        ]
+        for row in stale:
+            row.item.reset()
+            row.refresh()
+        if stale:
+            self._update_state()
 
     def _on_option_changed(self, *_args: object) -> None:
         if self._syncing:
@@ -488,7 +515,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._inhibit_cookie = self.app.inhibit(
             self, Gtk.ApplicationInhibitFlags.SUSPEND, "Upscaling images"
         )
-        self.processor.start([r.item for r in todo])
+        self.processor.start([r.item for r in todo], others=[r.item for r in self.rows])
         self._update_state()
 
     def _offer_model_download(self, err: ModelNotInstalledError) -> None:
@@ -623,6 +650,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.retry_btn.set_visible(not running and failed > 0)
         self.clear_btn.set_sensitive(count > 0 and not running)
         self.options_box.set_sensitive(not running)
+        self.lighting.set_sensitive(not running)
+        from pixelift.ui.preview import PreviewWindow
+
+        for window in self.app.get_windows():
+            if isinstance(window, PreviewWindow):
+                window.set_lighting_editable(not running)
         self.progress_revealer.set_reveal_child(self.processor is not None)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:

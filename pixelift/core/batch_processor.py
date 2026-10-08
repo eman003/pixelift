@@ -13,14 +13,20 @@ import logging
 import queue
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from pixelift.core.control import JobControl
 from pixelift.core.errors import CancelledError, UpscalerError, friendly_error
-from pixelift.core.image_processor import ProcessingOptions, ProcessResult, process_image
+from pixelift.core.image_processor import (
+    ProcessingOptions,
+    ProcessResult,
+    output_path_for,
+    process_image,
+)
 from pixelift.core.upscaler import Upscaler
+from pixelift.utils.image_utils import probe_image
 
 log = logging.getLogger(__name__)
 
@@ -122,6 +128,8 @@ class BatchProcessor:
         self._finished = threading.Event()
         self._started_at = 0.0
         self._remaining = 0
+        self._claims: dict[Path, Path] = {}  # output -> source, guarded by _lock
+        self._planned = False  # guarded by _lock
         self.summary: BatchSummary | None = None
 
     # --- control -----------------------------------------------------------
@@ -150,14 +158,22 @@ class BatchProcessor:
         return self._finished.wait(timeout)
 
     # --- running -----------------------------------------------------------
-    def start(self, items: list[QueueItem]) -> None:
+    def start(self, items: list[QueueItem], others: Iterable[QueueItem] = ()) -> None:
         """Process ``items`` in background threads (returns immediately).
 
-        Items that are already DONE or SKIPPED are left untouched.
+        Items that are already DONE or SKIPPED are left untouched. Their outputs,
+        and those of ``others`` (finished items outside this batch), are never
+        reused for a different source file.
         """
         if self.running:
             raise RuntimeError("batch already running")
         self._items = [i for i in items if i.status not in (ItemStatus.DONE, ItemStatus.SKIPPED)]
+        self._claims = {
+            _key(i.result.output): _key(i.path)
+            for i in itertools.chain(items, others)
+            if i.status in (ItemStatus.DONE, ItemStatus.SKIPPED) and i.result is not None
+        }
+        self._planned = False
         self._finished.clear()
         self._started_at = time.monotonic()
         work: queue.SimpleQueue[QueueItem] = queue.SimpleQueue()
@@ -183,6 +199,7 @@ class BatchProcessor:
 
     def _worker(self, work: queue.SimpleQueue[QueueItem]) -> None:
         try:
+            self._plan_outputs()
             while True:
                 try:
                     item = work.get_nowait()
@@ -219,7 +236,12 @@ class BatchProcessor:
             # Wait here (not mid-file) if paused before the job begins.
             self.control.check()
             result = process_image(
-                item.path, self.options, self.upscaler, on_progress, self.control
+                item.path,
+                self.options,
+                self.upscaler,
+                on_progress,
+                self.control,
+                claim=lambda output: self._claim(output, item.path),
             )
             item.result = result
             item.status = ItemStatus.SKIPPED if result.skipped else ItemStatus.DONE
@@ -235,6 +257,32 @@ class BatchProcessor:
             item.status = ItemStatus.FAILED
             item.stage = error.reason
         self._emit(EventKind.ITEM_FINISHED, item)
+
+    def _plan_outputs(self) -> None:
+        """Claim each item's preferred output name in queue order.
+
+        Done once, before any job starts, so when two sources map to the same
+        name the earlier one always gets it, however the workers interleave.
+        Runs on a worker thread because probing touches every file.
+        """
+        with self._lock:
+            if self._planned:
+                return
+            self._planned = True
+            for item in self._items:
+                if self.control.cancelled:
+                    return
+                try:
+                    info = probe_image(item.path)
+                    output = output_path_for(item.path, info.width, info.height, self.options)
+                except Exception:  # noqa: BLE001 - the job reports it properly
+                    continue
+                self._claims.setdefault(_key(output), _key(item.path))
+
+    def _claim(self, output: Path, source: Path) -> bool:
+        output, source = _key(output), _key(source)
+        with self._lock:
+            return self._claims.setdefault(output, source) == source
 
     def _finish(self) -> None:
         items = self._items
@@ -275,3 +323,7 @@ class BatchProcessor:
             self.listener(BatchEvent(kind, item, completed, total, fraction, message))
         except Exception:
             log.exception("Batch listener failed")
+
+
+def _key(path: Path) -> Path:
+    return Path(path).resolve()

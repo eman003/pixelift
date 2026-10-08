@@ -1,4 +1,4 @@
-"""Single-image pipeline: load -> upscale -> restore alpha/mode -> save.
+"""Single-image pipeline: load -> lighting -> upscale -> restore alpha/mode -> save.
 
 Shared by the GUI and the CLI.
 """
@@ -10,7 +10,7 @@ import os
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
@@ -19,6 +19,7 @@ from PIL import Image
 
 from pixelift.core.control import JobControl
 from pixelift.core.errors import ImageTooLargeError, OutputError, UpscalerError
+from pixelift.core.lighting import LightingSettings, apply_lighting
 from pixelift.core.upscaler import Upscaler
 from pixelift.utils import image_utils as iu
 from pixelift.utils.metadata import save_kwargs
@@ -31,6 +32,9 @@ os.umask(_UMASK)
 
 ExistingPolicy = Literal["skip", "overwrite", "rename"]
 Progress = Callable[[float, str], None]  # (fraction 0..1, stage text)
+# Reserve an output path for this source; False if another source in the same
+# batch already writes there (e.g. photo.jpg and photo.png -> photo_4x.png).
+OutputClaim = Callable[[Path], bool]
 
 
 @dataclass
@@ -44,6 +48,7 @@ class ProcessingOptions:
     existing: ExistingPolicy = "skip"
     preserve_metadata: bool = True
     jpeg_background: tuple[int, int, int] = (255, 255, 255)
+    lighting: LightingSettings = field(default_factory=LightingSettings)
 
     def validate(self) -> None:
         if self.scale not in (2, 3, 4):
@@ -63,6 +68,7 @@ class ProcessResult:
     seconds: float = 0.0
     skipped: bool = False
     note: str = ""
+    lighting: str = ""  # LightingSettings.tag() the output was made with
 
 
 def output_path_for(source: Path, width: int, height: int, options: ProcessingOptions) -> Path:
@@ -76,8 +82,22 @@ def output_path_for(source: Path, width: int, height: int, options: ProcessingOp
         width * options.scale,
         height * options.scale,
         ext,
+        options.lighting.tag(),
     )
     return folder / name
+
+
+def reserve_output(output: Path, existing: ExistingPolicy, claim: OutputClaim | None) -> Path:
+    """``output``, or ``output (2)``… when another source already claimed it."""
+    for candidate in iu.numbered_paths(output):
+        if existing == "rename" and candidate.exists():
+            continue
+        if claim is None or claim(candidate):
+            return candidate
+    raise OutputError(
+        f"Could not find a free file name for {output.name}.",
+        ["Choose a different output folder in Settings"],
+    )
 
 
 def check_feasible(width: int, height: int, options: ProcessingOptions, output: Path) -> None:
@@ -135,6 +155,7 @@ def process_image(
     upscaler: Upscaler,
     progress: Progress | None = None,
     control: JobControl | None = None,
+    claim: OutputClaim | None = None,
 ) -> ProcessResult:
     """Upscale one file and write the result. Raises UpscalerError subclasses."""
     started = time.monotonic()
@@ -143,27 +164,37 @@ def process_image(
     report = progress or (lambda _f, _s: None)
 
     info = iu.probe_image(source)
-    output = output_path_for(source, info.width, info.height, options)
-    if output.exists():
-        if options.existing == "skip":
-            log.info("Skipping %s: %s exists", source, output)
-            out_size = (info.width * options.scale, info.height * options.scale)
-            return ProcessResult(
-                source,
-                output,
-                (info.width, info.height),
-                out_size,
-                skipped=True,
-                note="Output already exists",
-            )
-        if options.existing == "rename":
-            output = iu.unique_path(output)
+    output = reserve_output(
+        output_path_for(source, info.width, info.height, options), options.existing, claim
+    )
+    if options.existing == "skip" and output.exists():
+        log.info("Skipping %s: %s exists", source, output)
+        out_size = (info.width * options.scale, info.height * options.scale)
+        return ProcessResult(
+            source,
+            output,
+            (info.width, info.height),
+            out_size,
+            skipped=True,
+            note="Output already exists",
+            lighting=options.lighting.tag(),
+        )
     check_feasible(info.width, info.height, options, output)
 
     report(0.0, "Loading")
     loaded = iu.load_image(source)
     if control:
         control.check()
+
+    # Lighting goes before the AI model: it is cheaper at the input resolution,
+    # and the model then reconstructs detail from the corrected tones (which is
+    # also what the preview shows). In place, so no extra full-size copy.
+    lighting = options.lighting.adjustments()
+    if not lighting.is_neutral:
+        report(0.01, "Adjusting lighting")
+        apply_lighting(loaded.rgb, lighting, out=loaded.rgb)
+        if control:
+            control.check()
 
     def on_tiles(done: int, total: int) -> None:
         report(0.02 + 0.9 * done / max(total, 1), f"Upscaling (tile {done}/{total})")
@@ -189,7 +220,8 @@ def process_image(
             note = "Transparency flattened (JPEG has no alpha channel)"
         else:
             img.putalpha(alpha)
-    elif loaded.grayscale:
+    elif loaded.grayscale and not lighting.changes_colour:
+        # A warmed, cooled or tinted grey source keeps that colour (as previewed).
         img = img.convert("L")
 
     fmt, _ = iu.OUTPUT_FORMATS[options.output_format]
@@ -213,7 +245,15 @@ def process_image(
     elapsed = time.monotonic() - started
     log.info("Upscaled %s -> %s (%dx%d) in %.1fs", source, output, out_w, out_h, elapsed)
     report(1.0, "Done")
-    return ProcessResult(source, output, in_size, (out_w, out_h), elapsed, note=note)
+    return ProcessResult(
+        source,
+        output,
+        in_size,
+        (out_w, out_h),
+        elapsed,
+        note=note,
+        lighting=options.lighting.tag(),
+    )
 
 
 def test_pattern(size: int = 48) -> np.ndarray:

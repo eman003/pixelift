@@ -172,3 +172,47 @@ def test_cannot_start_twice(image_factory):
         proc.start([])
     proc.cancel()
     proc.wait(10)
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_same_stem_sources_get_distinct_outputs(image_factory, workers):
+    items = [QueueItem(image_factory("photo.jpg")), QueueItem(image_factory("photo.png"))]
+    proc = BatchProcessor(FakeUpscaler(), ProcessingOptions(scale=2), workers=workers)
+    summary = proc.run(items)
+    assert summary.done == 2 and summary.skipped == 0
+    # The earlier item in the queue always wins the plain name.
+    assert [i.result.output.name for i in items] == ["photo_2x.png", "photo_2x (2).png"]
+
+    # A rerun skips both, each against its own output.
+    again = [QueueItem(i.path) for i in items]
+    summary = BatchProcessor(FakeUpscaler(), ProcessingOptions(scale=2), workers=workers).run(again)
+    assert summary.skipped == 2
+    assert [i.result.output for i in again] == [i.result.output for i in items]
+
+
+def test_output_names_follow_queue_order_not_job_timing(image_factory, monkeypatch):
+    """photo.png's job reaches its output first, but photo.jpg is first in the queue."""
+    from pixelift.utils import image_utils as iu
+
+    probe = iu.probe_image
+
+    def slow_jpg_probe(path):
+        if path.suffix == ".jpg":
+            time.sleep(0.2)
+        return probe(path)
+
+    monkeypatch.setattr(iu, "probe_image", slow_jpg_probe)  # the job's probe only
+    items = [QueueItem(image_factory("photo.jpg")), QueueItem(image_factory("photo.png"))]
+    BatchProcessor(FakeUpscaler(), ProcessingOptions(scale=2), workers=2).run(items)
+    assert [i.result.output.name for i in items] == ["photo_2x.png", "photo_2x (2).png"]
+
+
+def test_finished_items_outside_batch_keep_their_output(image_factory):
+    first = QueueItem(image_factory("photo.jpg"))
+    BatchProcessor(FakeUpscaler(), ProcessingOptions(scale=2)).run([first])
+    second = QueueItem(image_factory("photo.png"))
+    proc = BatchProcessor(FakeUpscaler(), ProcessingOptions(scale=2))
+    proc.start([second], others=[first, second])
+    proc.wait()
+    assert second.status is ItemStatus.DONE
+    assert second.result.output.name == "photo_2x (2).png"

@@ -4,24 +4,33 @@ Memory: both images are loaded as previews no larger than ``PREVIEW_MAX``
 pixels per side. When the user zooms in beyond the preview's resolution, only
 the visible region is decoded at full resolution (in a background thread) and
 drawn on top — the full-resolution image is never kept in memory by the UI.
+
+Before an image is upscaled, the "after" side previews the lighting profile:
+it is applied to a downscaled copy of the original (never the AI model), and
+to the decoded region when zoomed in, so slider changes update in a moment.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
 from gi.repository import Adw, Gdk, GLib, GObject, Graphene, Gsk, Gtk, Pango
+from PIL import Image
 
 from pixelift.core.batch_processor import ItemStatus, QueueItem
+from pixelift.core.lighting import Adjustments, apply_to_pil
 from pixelift.ui.async_utils import run_in_thread
+from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.ui.widgets.textures import texture_from_pil
 from pixelift.utils.image_utils import ImageInfo, load_preview, load_region
 
 log = logging.getLogger(__name__)
 
 PREVIEW_MAX = 4096
+LIGHTING_PREVIEW_MAX = 1600  # live lighting preview; zooming in loads full detail
 MAX_ZOOM = 16.0
 HANDLE_RADIUS = 14
 
@@ -45,6 +54,15 @@ class _Side:
         self.source_size: tuple[int, int] = (0, 0)  # full-resolution size of the file
         self.detail: tuple[Gdk.Texture, tuple[float, float, float, float]] | None = None
         self.generation = 0
+        # Applied (off the main thread) to detail crops decoded from ``path``.
+        self.transform: Callable[[Image.Image], Image.Image] | None = None
+
+    def clear(self) -> None:
+        self.path = None
+        self.texture = None
+        self.detail = None
+        self.transform = None
+        self.generation += 1
 
 
 class CompareView(Gtk.Widget):
@@ -59,6 +77,7 @@ class CompareView(Gtk.Widget):
         self.after = _Side()
         self.image_size: tuple[int, int] = (0, 0)  # logical size = upscaled size
         self.mode = "slider"
+        self.after_label = "After"
         self.split = 0.5
         self.zoom: float | None = None  # None = fit to window
         self.center = (0.0, 0.0)
@@ -142,6 +161,13 @@ class CompareView(Gtk.Widget):
             GLib.source_remove(self._detail_source)
         self._detail_source = GLib.timeout_add(180, self._request_details)
 
+    def invalidate_detail(self, side: _Side) -> None:
+        """Drop ``side``'s detail crop (its content changed) and load it again."""
+        side.generation += 1
+        side.detail = None
+        self.queue_draw()
+        self._request_detail(side)
+
     # --- detail loading ----------------------------------------------------
     def _request_details(self) -> bool:
         self._detail_source = 0
@@ -182,17 +208,19 @@ class CompareView(Gtk.Widget):
         side.generation += 1
         generation = side.generation
         path = side.path
+        transform = side.transform
 
-        def done(img: object) -> None:
+        def load() -> Image.Image:
+            region = load_region(path, box, (out_w, out_h))
+            return transform(region) if transform else region
+
+        def done(img: Image.Image) -> None:
             if generation == side.generation:
                 side.detail = (texture_from_pil(img), logical)
                 self.queue_draw()
 
         run_in_thread(
-            load_region,
-            path,
-            box,
-            (out_w, out_h),
+            load,
             on_done=done,
             on_error=lambda e: log.warning("Detail load failed: %s", e),
             name="preview-detail",
@@ -307,7 +335,7 @@ class CompareView(Gtk.Widget):
             self._label(snapshot, "Before", 12, 12)
         elif mode == "after":
             self._draw_side(snapshot, self.after, origin, zoom, filt)
-            self._label(snapshot, "After" if has_both else "Upscaled", 12, 12)
+            self._label(snapshot, self.after_label if has_both else "Upscaled", 12, 12)
         else:
             sx = round(self.split * w)
             snapshot.push_clip(_rect(0, 0, sx, h))
@@ -341,15 +369,21 @@ class CompareView(Gtk.Widget):
             if sx > 90:
                 self._label(snapshot, "Before", 12, 12)
             if w - sx > 90:
-                self._label(snapshot, "After", w - 12, 12, align_right=True)
+                self._label(snapshot, self.after_label, w - 12, 12, align_right=True)
 
 
 class PreviewWindow(Adw.Window):
     def __init__(self, parent: Gtk.Window, item: QueueItem, info: ImageInfo) -> None:
         super().__init__(transient_for=parent, modal=False, title=item.path.name)
         self.set_default_size(1100, 760)
+        self.app = parent.get_application()
         self.item = item
         self.info = info
+        self._lighting_base: Image.Image | None = None  # downscaled original
+        self._lighting_shown: Adjustments | None = Adjustments()  # None: unknown
+        self.lighting: LightingControls | None = None
+        self._lighting_busy = False
+        self._lighting_generation = 0
         output = (
             item.result.output
             if item.result and item.status in (ItemStatus.DONE, ItemStatus.SKIPPED)
@@ -385,6 +419,7 @@ class PreviewWindow(Adw.Window):
             btn.connect("toggled", self._on_mode_toggled, mode)
             modes.append(btn)
             self.mode_buttons[mode] = btn
+        self.modes = modes
         modes.set_sensitive(self.output is not None)
         header.pack_start(modes)
 
@@ -429,7 +464,21 @@ class PreviewWindow(Adw.Window):
         )
         hint.add_css_class("dim-label")
         hint.add_css_class("caption")
-        toolbar.add_bottom_bar(hint)
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        if self.output is None:
+            # Not upscaled yet: tune the lighting here and see it on the right.
+            # (An upscaled result already has its lighting baked in.)
+            self.lighting = LightingControls(self.app)
+            self.lighting.set_margin_top(6)
+            self.lighting.set_margin_start(12)
+            self.lighting.set_margin_end(12)
+            bottom.append(Adw.Clamp(maximum_size=720, child=self.lighting))
+            # A running batch has already taken its lighting (main window too).
+            self.set_lighting_editable(not getattr(parent, "running", False))
+            self.app.on_lighting_changed(self._update_lighting)
+            self.connect("close-request", self._on_close_request)
+        bottom.append(hint)
+        toolbar.add_bottom_bar(bottom)
         self.set_content(toolbar)
 
         keys = Gtk.EventControllerKey()
@@ -441,15 +490,24 @@ class PreviewWindow(Adw.Window):
             self._load, on_done=self._on_loaded, on_error=self._on_load_error, name="preview-load"
         )
 
-    def _load(self) -> tuple[object, tuple[int, int], object | None, tuple[int, int] | None]:
+    def set_lighting_editable(self, editable: bool) -> None:
+        if self.lighting is not None:
+            self.lighting.set_sensitive(editable)
+
+    def _load(self) -> tuple:
         before, before_size = load_preview(self.item.path, PREVIEW_MAX)
-        after = after_size = None
+        after = after_size = base = None
         if self.output is not None:
             after, after_size = load_preview(self.output, PREVIEW_MAX)
-        return before, before_size, after, after_size
+        else:
+            # Downscaled base for the live lighting preview, made here rather
+            # than on the UI thread.
+            base = before.copy()
+            base.thumbnail((LIGHTING_PREVIEW_MAX, LIGHTING_PREVIEW_MAX), Image.Resampling.BILINEAR)
+        return before, before_size, after, after_size, base
 
     def _on_loaded(self, result: tuple) -> None:
-        before, before_size, after, after_size = result
+        before, before_size, after, after_size, base = result
         self.spinner.set_visible(False)
         self.view.before.texture = texture_from_pil(before)
         self.view.before.source_size = before_size
@@ -459,7 +517,80 @@ class PreviewWindow(Adw.Window):
             self.view.set_images(after_size)
         else:
             self.view.set_images(before_size)
+            self._lighting_base = base
+            self._update_lighting()
         self._update_zoom_label()
+
+    # --- lighting preview -------------------------------------------------
+    def _update_lighting(self) -> None:
+        """Re-render the lighting side if the lighting settings changed."""
+        if self._lighting_base is None:
+            return
+        wanted = self.app.settings.lighting().adjustments()
+        if wanted == self._lighting_shown:
+            return
+        if self._lighting_busy:
+            return  # picked up when the running render finishes
+        self._lighting_shown = wanted
+        after = self.view.after
+        if wanted.is_neutral:
+            after.clear()
+            self._set_lighting_mode(False)
+            return
+        self._lighting_busy = True
+        self._lighting_generation += 1
+        generation = self._lighting_generation
+
+        def done(img: Image.Image) -> None:
+            self._lighting_busy = False
+            if generation != self._lighting_generation:
+                return
+            after.texture = texture_from_pil(img)
+            after.path = self.item.path
+            after.source_size = self.view.before.source_size
+            after.transform = lambda region, a=wanted: apply_to_pil(region, a)
+            self._set_lighting_mode(True)
+            self.view.invalidate_detail(after)
+            self._update_lighting()  # settings may have moved on meanwhile
+
+        def failed(exc: BaseException) -> None:
+            self._lighting_busy = False
+            if generation != self._lighting_generation:
+                return
+            log.warning("Lighting preview failed: %s", exc)
+            # Nothing valid is shown now: any later change renders again, and
+            # one made during this render is picked up straight away.
+            self._lighting_shown = None
+            if self.app.settings.lighting().adjustments() != wanted:
+                self._update_lighting()
+
+        run_in_thread(
+            apply_to_pil,
+            self._lighting_base,
+            wanted,
+            on_done=done,
+            on_error=failed,
+            name="preview-lighting",
+        )
+
+    def _set_lighting_mode(self, on: bool) -> None:
+        was_on = self.modes.get_sensitive()
+        self.modes.set_sensitive(on)
+        self.view.after_label = "Lighting"
+        self.mode_buttons["after"].set_label("Lighting" if on else "After")
+        self.mode_buttons["after"].set_tooltip_text("With lighting (A)")
+        if on and not was_on:
+            self.mode_buttons["slider"].set_active(True)
+        elif not on:
+            self.mode_buttons["before"].set_active(True)
+        self.view.queue_draw()
+
+    def _on_close_request(self, _window: Gtk.Window) -> bool:
+        self._lighting_generation += 1
+        self.app.off_lighting_changed(self._update_lighting)
+        if self.lighting is not None:
+            self.lighting.shutdown()
+        return False
 
     def _on_load_error(self, exc: BaseException) -> None:
         self.spinner.set_visible(False)
@@ -487,10 +618,10 @@ class PreviewWindow(Adw.Window):
         name = Gdk.keyval_name(keyval) or ""
         if name == "Escape":
             self.close()
-        elif name == "space" and self.output:
+        elif name == "space" and self.modes.get_sensitive():
             target = "after" if self.view.mode == "before" else "before"
             self.mode_buttons[target].set_active(True)
-        elif name in ("s", "b", "a") and self.output:
+        elif name in ("s", "b", "a") and self.modes.get_sensitive():
             self.mode_buttons[{"s": "slider", "b": "before", "a": "after"}[name]].set_active(True)
         elif name in ("plus", "equal", "KP_Add"):
             self.view.zoom_by(1.25)

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pixelift.core import lighting
 from pixelift.core.image_processor import ProcessingOptions
 from pixelift.storage import paths
 from pixelift.utils.image_utils import DEFAULT_TEMPLATE, OUTPUT_FORMATS
@@ -37,6 +38,18 @@ class Settings:
     filename_template: str = DEFAULT_TEMPLATE
     existing: str = "skip"
     preserve_metadata: bool = True
+    # Lighting (applied before upscaling); the lighting_<name> values are the
+    # Custom profile's adjustments, -100..100.
+    lighting_profile: str = lighting.ORIGINAL
+    lighting_intensity: int = 100
+    lighting_exposure: int = 0
+    lighting_brightness: int = 0
+    lighting_contrast: int = 0
+    lighting_highlights: int = 0
+    lighting_shadows: int = 0
+    lighting_temperature: int = 0
+    lighting_tint: int = 0
+    lighting_saturation: int = 0
     # Performance
     concurrent_jobs: int = 0  # 0 = automatic
     cpu_threads: int = 0  # 0 = all cores
@@ -63,7 +76,19 @@ class Settings:
         self.concurrent_jobs = min(8, max(0, int(self.concurrent_jobs)))
         self.cpu_threads = max(0, int(self.cpu_threads))
         self.gpu_memory_limit_mb = max(0, int(self.gpu_memory_limit_mb))
+        if self.lighting_profile not in {p.id for p in lighting.all_profiles()}:
+            self.lighting_profile = default.lighting_profile
+        self.lighting_intensity = min(100, max(0, int(self.lighting_intensity)))
+        for name in lighting.ADJUSTMENT_NAMES:
+            key = f"lighting_{name}"
+            setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
         return self
+
+    def lighting(self) -> lighting.LightingSettings:
+        custom = lighting.Adjustments(
+            **{name: getattr(self, f"lighting_{name}") for name in lighting.ADJUSTMENT_NAMES}
+        )
+        return lighting.LightingSettings(self.lighting_profile, self.lighting_intensity, custom)
 
     def processing_options(self) -> ProcessingOptions:
         return ProcessingOptions(
@@ -75,6 +100,7 @@ class Settings:
             filename_template=self.filename_template or DEFAULT_TEMPLATE,
             existing=self.existing,  # type: ignore[arg-type]
             preserve_metadata=self.preserve_metadata,
+            lighting=self.lighting(),
         )
 
 

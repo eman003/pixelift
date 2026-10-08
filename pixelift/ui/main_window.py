@@ -26,7 +26,7 @@ from PIL import Image
 from pixelift import APP_ID, APP_NAME
 from pixelift.core import camera_looks as cl
 from pixelift.core import device_manager as dm
-from pixelift.core import lighting
+from pixelift.core import lighting, presets
 from pixelift.core.batch_processor import (
     BatchEvent,
     BatchProcessor,
@@ -45,6 +45,7 @@ from pixelift.ui.startup import STATUS_DEVICE, STATUS_READY, StartupScreen
 from pixelift.ui.widgets.camera_looks import GRAIN_LABELS, CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
+from pixelift.ui.widgets.presets import PresetPanel
 from pixelift.ui.widgets.restoration import (
     PRIVACY_TEXT,
     BlackAndWhiteBanner,
@@ -66,6 +67,7 @@ MAX_DEVICE_WAIT_MS = 1500  # after which the workspace shows; detection finishes
 STAGE_SIZE = 1600  # the workspace preview (px, longest side); Compare shows full detail
 FORMATS = (("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WebP"))
 TABS = (
+    ("preset", "Preset", "One-click recipes: a starting point for your photo"),
     ("enhance", "Enhance", "Scale, AI model and restoration"),
     ("light", "Light", "Lighting profile and intensity"),
     ("look", "Look", "Camera look, intensity and grain"),
@@ -233,6 +235,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.lighting = LightingControls(app)
         yield
         self.camera_look = CameraLookControls(app)
+        yield
+        self.preset_panel = PresetPanel(app)
         yield
         toolbar.add_bottom_bar(self._build_controls())
         toolbar.set_bottom_bar_style(Adw.ToolbarStyle.RAISED)
@@ -588,6 +592,7 @@ class MainWindow(Adw.ApplicationWindow):
             interpolate_size=True,
         )
         for key, widget in (
+            ("preset", self.preset_panel),
             ("enhance", enhance),
             ("light", self.lighting),
             ("look", self.camera_look),
@@ -726,7 +731,9 @@ class MainWindow(Adw.ApplicationWindow):
         if look.look != cl.ORIGINAL and settings.camera_look_grain != cl.GRAIN_AUTO:
             look_text += " · " + GRAIN_LABELS[settings.camera_look_grain]
         fmt = dict(FORMATS)[settings.output_format]
+        preset_name, _modified = presets.status(settings)
         values = {
+            "preset": (presets.label(settings), preset_name not in ("Original", "Custom")),
             "enhance": (enhance, False),
             "light": (light_text, light.active),
             "look": (look_text, look.active),
@@ -1192,11 +1199,13 @@ class MainWindow(Adw.ApplicationWindow):
         self._look_sample_path = path
         if path is None:
             self.camera_look.set_sample(None)
+            self.preset_panel.set_sample(None)
             return
 
         def done(result: tuple, wanted: Path = path) -> None:
             if wanted == self._look_sample_path:
                 self.camera_look.set_sample(result[0])
+                self.preset_panel.set_sample(result[0])
 
         run_in_thread(
             load_preview,

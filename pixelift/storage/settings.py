@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from pixelift.core import camera_looks as cl
-from pixelift.core import lighting
+from pixelift.core import lighting, presets
 from pixelift.core.image_processor import ProcessingOptions
 from pixelift.core.restoration import settings as rs
 from pixelift.storage import paths
@@ -62,6 +62,8 @@ class Settings:
     camera_look_grain: str = cl.GRAIN_AUTO
     camera_look_favorites: list[str] = field(default_factory=list)
     camera_look_saved: dict[str, dict[str, int]] = field(default_factory=dict)
+    # The last preset chosen ("" = none); its values live in the fields it sets.
+    preset: str = ""
     look_exposure: int = 0
     look_contrast: int = 0
     look_highlights: int = 0
@@ -137,6 +139,8 @@ class Settings:
             setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
         self._normalise_restoration(default)
         self._normalise_camera_look(default)
+        if not presets.has_preset(self.preset):
+            self.preset = ""
         return self
 
     def _normalise_camera_look(self, default: Settings) -> None:

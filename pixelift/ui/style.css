@@ -238,3 +238,20 @@
 .startup-details label {
   padding: 10px 12px;
 }
+
+/* --- Presets ---------------------------------------------------------------- */
+.preset-card {
+  padding: 4px;
+  border-radius: 12px;
+}
+
+.preset-card.selected-preset {
+  background-color: alpha(@accent_bg_color, 0.18);
+  outline: 2px solid alpha(@accent_color, 0.8);
+  outline-offset: -2px;
+}
+
+.preset-thumb {
+  border-radius: 8px;
+  background-color: alpha(currentColor, 0.06);
+}

@@ -371,3 +371,38 @@ def test_startup_screen_states():
     screen.show_starting()
     assert screen.status.get_visible() and not screen.error_box.get_visible()
     screen.stop()
+
+
+class _PresetStubApp(_StubApp):
+    def settings_changed(self):
+        self.lighting_changed()
+
+
+def test_preset_panel_applies_and_tracks_modified():
+    from pixelift.core import camera_looks as cl
+    from pixelift.core import presets
+    from pixelift.ui.widgets.presets import PresetPanel, _render_thumbnails, preset_recipe
+
+    app = _PresetStubApp()
+    panel = PresetPanel(app)
+    assert panel.cards["original"].has_css_class("selected-preset")
+    assert not panel.cards["old-photo"].get_visible()  # Restore Photos only
+    panel.cards["landscape"].activate()  # one click, no confirmation
+    assert app.settings.preset == "landscape" and app.settings.camera_look == "nikon-landscape"
+    assert panel.cards["landscape"].has_css_class("selected-preset")
+    assert not panel.reset_btn.get_visible()
+    app.settings.lighting_intensity = 20
+    app.lighting_changed()
+    assert panel.reset_btn.get_visible() and panel.reset_btn.get_label() == "Reset to Landscape"
+    panel.reset_btn.emit("clicked")
+    assert presets.label(app.settings) == "Landscape" and not panel.reset_btn.get_visible()
+
+    app.settings.mode = "restore"
+    app.lighting_changed()
+    assert panel.cards["old-photo"].get_visible() and not panel.cards["portrait"].get_visible()
+    # Thumbnails: every preset rendered from the user's photo, settings untouched.
+    recipes = {p.id: preset_recipe(app.settings, p.id) for p in presets.all_presets()}
+    assert app.settings.preset == "landscape"
+    assert set(_render_thumbnails(cl.sample_image(), recipes)) == set(panel.cards)
+    panel.shutdown()
+    assert panel.sync not in app.listeners

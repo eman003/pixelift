@@ -4,6 +4,21 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] - 2026-10-08
+
+### Added
+
+- **Presets**: one-click recipes in a new **Preset** tab — Natural, Portrait,
+  Landscape, Cinematic, Film, Vintage and Monochrome, plus Old Photo in Restore
+  Photos mode (and Original to clear everything). Each card is previewed on
+  your own photo and applies at once; the workspace previews the result live,
+  and Original / Compare show the before and after. A preset only sets
+  existing controls — lighting, camera look, intensity, grain and (Old Photo)
+  the restoration level — never the scale, model, format or whether to
+  colorize, and every value stays editable: the tab then reads
+  *Natural · Modified* with a **Reset to Natural** button. The last preset is
+  remembered.
+
 ## [1.5.0] - 2026-10-08
 
 ### Added

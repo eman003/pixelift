@@ -177,7 +177,7 @@ sidebar (**F9** shows or hides it) — and the dock at the bottom.
 
 1. Drop images or folders onto the window (or click **Select Images**, Ctrl+O).
 2. The dock has one tab per task, each showing its current setting:
-   **Enhance** (scale and AI model; restoration in Restore Photos mode),
+   **Preset** (see [Presets](#presets)), **Enhance** (scale and AI model; restoration in Restore Photos mode),
    **Light** (see [Lighting](#lighting)), **Look** (see
    [Camera Looks](#camera-looks)) and **Export** (format and output folder).
    Click a tab to open its controls; click it again (or press **Esc**) to fold
@@ -198,6 +198,20 @@ Results go to `<original folder>/upscaled/` by default, named with the template
 When several images in one batch would get the same output name (e.g.
 `photo.jpg` and `photo.png`), the one earlier in the queue gets `photo_4x.png`
 and the next `photo_4x (2).png` — the same way on every run.
+
+### Presets
+
+The **Preset** tab offers a few one-click recipes, each previewed on your own
+photo: **Natural** (balanced light and clean colour), **Portrait**,
+**Landscape**, **Cinematic**, **Film**, **Vintage** and **Monochrome** — and in
+Restore Photos mode **Old Photo** (standard repair of dust, scratches and
+fading). **Original** clears everything.
+
+A preset is a starting point made of Pixelift's own controls: it sets the
+lighting profile, camera look, their intensities and the grain (Old Photo also
+the restoration level). It never changes the scale, AI model, file format or
+whether black-and-white photos are colorized. Change anything afterwards and
+the tab shows *Natural · Modified*; **Reset to Natural** brings the preset back.
 
 ### Lighting
 

@@ -26,6 +26,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.6.0" date="2026-10-08">
+      <description>
+        <p>Presets: one-click recipes — Natural, Portrait, Landscape, Cinematic, Film,
+          Vintage, Monochrome and Old Photo — previewed on your own photo and fully
+          adjustable afterwards.</p>
+      </description>
+    </release>
     <release version="1.5.0" date="2026-10-08">
       <description>
         <p>A polished startup screen: the Pixelift logo eases in with a soft glow and a

@@ -1,8 +1,125 @@
+/* --- Drop target ----------------------------------------------------------- */
 .drop-zone:drop(active) {
   outline: 3px dashed alpha(@accent_color, 0.8);
   outline-offset: -12px;
   border-radius: 18px;
   background-color: alpha(@accent_bg_color, 0.08);
+}
+
+/* --- Header ---------------------------------------------------------------- */
+.mode-switcher {
+  background-color: alpha(currentColor, 0.07);
+  border-radius: 999px;
+  padding: 3px;
+}
+
+.mode-switcher > button {
+  border-radius: 999px;
+  padding: 4px 14px;
+  min-height: 24px;
+  background: none;
+  box-shadow: none;
+  font-weight: 600;
+}
+
+.mode-switcher > button:hover:not(:checked) {
+  background-color: alpha(currentColor, 0.07);
+}
+
+.mode-switcher > button:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.device-chip {
+  border-radius: 999px;
+  padding: 2px 12px;
+  min-height: 24px;
+  font-size: 0.85em;
+  background-color: alpha(currentColor, 0.06);
+}
+
+/* --- Empty state ----------------------------------------------------------- */
+.drop-card {
+  border: 2px dashed alpha(currentColor, 0.16);
+  border-radius: 28px;
+  padding: 48px 36px 40px 36px;
+  background-color: alpha(currentColor, 0.02);
+}
+
+.drop-zone:drop(active) .drop-card {
+  border-color: alpha(@accent_color, 0.8);
+  background-color: alpha(@accent_bg_color, 0.1);
+}
+
+.privacy-note {
+  font-size: smaller;
+}
+
+/* --- Workspace: the stage -------------------------------------------------- */
+.stage {
+  background-color: mix(@window_bg_color, black, 0.08);
+}
+
+.stage-picture {
+  margin: 28px 28px 64px 28px;
+}
+
+.stage-chip {
+  background-color: rgba(0, 0, 0, 0.55);
+  color: white;
+  border-radius: 999px;
+}
+
+.stage-bottom {
+  margin: 16px;
+}
+
+.stage-badge {
+  margin: 16px;
+  padding: 3px 12px;
+  font-size: 0.78em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.stage-badge.finished {
+  background-color: alpha(@success_bg_color, 0.9);
+}
+
+.stage-info {
+  padding: 6px 14px;
+  font-size: 0.9em;
+}
+
+.stage-tools {
+  padding: 3px;
+}
+
+.stage-tools > button {
+  color: white;
+  border-radius: 999px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 2px 10px;
+}
+
+.stage-tools > button:checked {
+  background-color: alpha(white, 0.22);
+}
+
+/* --- Workspace: the photo sidebar ------------------------------------------ */
+.photo-sidebar {
+  background-color: @window_bg_color;
+}
+
+.sidebar-header {
+  padding: 12px 8px 6px 16px;
+}
+
+.navigation-sidebar > row.queue-row {
+  padding: 6px 8px;
+  border-radius: 12px;
 }
 
 .thumbnail {
@@ -19,10 +136,62 @@
 .status-skipped { color: alpha(currentColor, 0.6); }
 .status-processing { color: @accent_color; }
 
-.control-panel {
-  padding: 12px 18px 18px 18px;
+.bw-banner {
+  padding: 10px 14px;
 }
 
+/* --- The dock: task tabs, controls and the primary action ------------------ */
+.dock-bar {
+  padding: 10px 16px 12px 16px;
+}
+
+.dock-panel {
+  padding: 16px 24px 4px 24px;
+}
+
+.dock-progress {
+  padding: 12px 24px 0 24px;
+}
+
+.dock-tab {
+  border-radius: 12px;
+  padding: 6px 14px;
+}
+
+.dock-tab:checked {
+  background-color: alpha(@accent_bg_color, 0.16);
+}
+
+.dock-tab:checked:hover {
+  background-color: alpha(@accent_bg_color, 0.22);
+}
+
+.dock-tab-title {
+  font-size: 0.7em;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  opacity: 0.55;
+}
+
+.dock-tab:checked .dock-tab-title {
+  color: @accent_color;
+  opacity: 1;
+}
+
+.dock-tab-value {
+  font-weight: 600;
+}
+
+.dock-tab.modified .dock-tab-value {
+  color: @accent_color;
+}
+
+.primary-action {
+  padding: 10px 30px;
+  font-weight: 700;
+}
+
+/* --- Compare window and look gallery --------------------------------------- */
 .compare-view {
   background-color: #1e1e1e;
 }
@@ -30,14 +199,6 @@
 .osd-pill {
   border-radius: 999px;
   padding: 2px 10px;
-}
-
-.privacy-note {
-  font-size: smaller;
-}
-
-.bw-banner {
-  padding: 10px 14px;
 }
 
 .look-card {

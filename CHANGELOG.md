@@ -4,6 +4,27 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] - 2026-10-08
+
+### Changed
+
+- **Redesigned main window**, built around the photo:
+  - The workspace shows the selected photo large on a neutral stage, with the
+    lighting and camera look previewed live on it (**Original** shows it
+    without them) and the result once processed (*Upscaled* / *Restored*).
+    Compare, zoom and Show in Folder are on the stage.
+  - The photo list moved to a collapsible sidebar (**F9**); it floats over the
+    stage on smaller windows.
+  - The controls moved into a dock with one tab per task — Enhance, Light,
+    Look, Export — each showing its current setting and opening its controls
+    only when clicked (**Esc** folds them away). Scale and format are
+    segmented buttons.
+  - The primary action names the work: *Upscale 3 Photos*, *Restore 1 Photo*.
+  - A calmer header: a pill-shaped mode switcher and a quiet processing-device
+    chip (opens Preferences) instead of the window subtitle.
+  - A new empty state, and narrow-window layouts without horizontal overflow.
+- Screenshots in the README.
+
 ## [1.3.0] - 2026-10-08
 
 ### Added

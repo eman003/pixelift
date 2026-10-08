@@ -26,6 +26,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.4.0" date="2026-10-08">
+      <description>
+        <p>A redesigned window built around your photo: a large workspace with the lighting
+          and camera look previewed live, a collapsible photo sidebar, and a calm dock with
+          Enhance, Light, Look and Export tabs that open only when you need them.</p>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-10-08">
       <description>
         <p>Camera Looks: 30 camera- and film-inspired renderings with intensity, film grain,

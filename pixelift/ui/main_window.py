@@ -1,20 +1,31 @@
-"""Main window: drop zone, image queue, output, lighting and camera look options,
-batch controls.
+"""Main window: a photo workspace with a contextual control dock.
 
-Two modes share the queue, the worker and the output options: *Upscale* and
-*Restore Photos* (AI photo restoration, which can also upscale).
+Three zones, the image first:
+
+* the header: Upscale / Restore Photos mode, adding photos, the menu;
+* the workspace: the selected photo on a neutral stage (the lighting and camera
+  look previewed live on it, the result once processed), with the photo list
+  in a collapsible sidebar;
+* the dock: one tab per task (Enhance, Light, Look, Export), each showing its
+  current setting and opening its controls on demand, and the primary action.
+
+Both modes share the queue, the worker and the output options.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
+from PIL import Image
 
 from pixelift import APP_ID, APP_NAME
+from pixelift.core import camera_looks as cl
 from pixelift.core import device_manager as dm
+from pixelift.core import lighting
 from pixelift.core.batch_processor import (
     BatchEvent,
     BatchProcessor,
@@ -29,7 +40,7 @@ from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
 from pixelift.ui.async_utils import idle, run_in_thread
 from pixelift.ui.image_queue import QueueRow, ThumbnailLoader
-from pixelift.ui.widgets.camera_looks import CameraLookControls
+from pixelift.ui.widgets.camera_looks import GRAIN_LABELS, CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.ui.widgets.restoration import (
@@ -38,6 +49,7 @@ from pixelift.ui.widgets.restoration import (
     RestorationDialog,
     RestorationPanel,
 )
+from pixelift.ui.widgets.textures import texture_from_pil
 from pixelift.utils.image_utils import SUPPORTED_EXTENSIONS, collect_images, load_preview
 
 if TYPE_CHECKING:
@@ -47,15 +59,22 @@ log = logging.getLogger(__name__)
 
 SCALES = (2, 4)
 LOOK_SAMPLE_SIZE = 400  # the camera look cards' sample photo (px, longest side)
+STAGE_SIZE = 1600  # the workspace preview (px, longest side); Compare shows full detail
 FORMATS = (("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WebP"))
+TABS = (
+    ("enhance", "Enhance", "Scale, AI model and restoration"),
+    ("light", "Light", "Lighting profile and intensity"),
+    ("look", "Look", "Camera look, intensity and grain"),
+    ("export", "Export", "File format and output folder"),
+)
 
 
 class MainWindow(Adw.ApplicationWindow):
     def __init__(self, app: UpscalerApplication) -> None:
         super().__init__(application=app, title=APP_NAME)
         self.app = app
-        self.set_default_size(920, 720)
-        self.set_size_request(360, 480)
+        self.set_default_size(1180, 800)
+        self.set_size_request(380, 520)
         self.rows: list[QueueRow] = []
         self.thumbnails = ThumbnailLoader()
         self.processor: BatchProcessor | None = None
@@ -65,13 +84,23 @@ class MainWindow(Adw.ApplicationWindow):
         self._syncing = False
         self._bw_answered = False  # asked "Restore in B&W or colorize?" this session
         self._look_sample_path: Path | None = None  # shown on the camera look cards
+        # The stage: the selected photo (or its result), with the look previewed live.
+        self._stage_row: QueueRow | None = None
+        self._stage_source: Path | None = None  # the file the stage shows
+        self._stage_base: Image.Image | None = None
+        self._stage_is_output = False
+        self._stage_base_texture: Gdk.Texture | None = None
+        self._stage_look_texture: Gdk.Texture | None = None
+        self._stage_shown_look: tuple | None = None  # what the look texture renders
+        self._stage_busy = False
+        self._stage_generation = 0
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(self._build_header())
         self.toasts = Adw.ToastOverlay()
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, vexpand=True)
         self.stack.add_named(self._build_empty_page(), "empty")
-        self.stack.add_named(self._build_queue_page(), "queue")
+        self.stack.add_named(self._build_workspace(), "queue")
         self.toasts.set_child(self.stack)
         self.toasts.add_css_class("drop-zone")
         toolbar.set_content(self.toasts)
@@ -83,38 +112,56 @@ class MainWindow(Adw.ApplicationWindow):
         drop.connect("drop", self._on_drop)
         self.toasts.add_controller(drop)
 
+        # The sidebar floats over the stage on smaller windows; on narrow ones
+        # the controls stack vertically too. (Only the last matching applies.)
+        medium = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 860sp"))
         narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 640sp"))
-        narrow.add_setter(self.options_box, "orientation", Gtk.Orientation.VERTICAL)
-        narrow.add_setter(self.restore_panel, "orientation", Gtk.Orientation.VERTICAL)
-        narrow.add_setter(self.lighting, "orientation", Gtk.Orientation.VERTICAL)
-        narrow.add_setter(self.camera_look, "orientation", Gtk.Orientation.VERTICAL)
-        narrow.add_setter(self.buttons_box, "orientation", Gtk.Orientation.VERTICAL)
+        for breakpoint in (medium, narrow):
+            breakpoint.add_setter(self.split_view, "collapsed", True)
+            breakpoint.add_setter(self.split_view, "show-sidebar", False)
+        for box in (
+            self.enhance_box,
+            self.export_box,
+            self.restore_panel,
+            self.lighting,
+            self.camera_look,
+            self.dock_bar,
+        ):
+            narrow.add_setter(box, "orientation", Gtk.Orientation.VERTICAL)
+        narrow.add_setter(self.tabs_box, "halign", Gtk.Align.FILL)
+        narrow.add_setter(self.device_btn, "visible", False)
+        narrow.add_setter(self.header_add_btn, "visible", False)
+        narrow.add_setter(self.mode_buttons["restore"], "label", "Restore")
+        narrow.add_setter(self.bw_banner.get_child(), "orientation", Gtk.Orientation.VERTICAL)
+        narrow.add_setter(self.buttons_box, "halign", Gtk.Align.FILL)
+        self.add_breakpoint(medium)
         self.add_breakpoint(narrow)
 
         self.connect("close-request", self._on_close_request)
         app.on_settings_changed(self._sync_from_settings)
         app.on_lighting_changed(self._reset_stale)
+        app.on_lighting_changed(self._on_look_changed)
         app.downloads.subscribe(lambda *_: self._refresh_model_list())
         app.when_devices_ready(self._on_devices)
         self._sync_from_settings()
+        self._on_look_changed()
         self._update_state()
 
     # --- construction ------------------------------------------------------
     def _build_header(self) -> Adw.HeaderBar:
         header = Adw.HeaderBar()
-        self.window_title = Adw.WindowTitle(title=APP_NAME, subtitle="Detecting processing device…")
-        header.set_title_widget(self.window_title)
 
-        add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Add Images (Ctrl+O)")
-        add.connect("clicked", lambda _b: self.open_file_dialog())
-        header.pack_start(add)
-        self.clear_btn = Gtk.Button(
-            icon_name="edit-clear-all-symbolic", tooltip_text="Clear Finished Images"
+        self.sidebar_btn = Gtk.ToggleButton(
+            icon_name="sidebar-show-symbolic", tooltip_text="Photos (F9)", active=True
         )
-        self.clear_btn.connect("clicked", lambda _b: self.clear_finished())
-        header.pack_start(self.clear_btn)
+        header.pack_start(self.sidebar_btn)
+        self.header_add_btn = Gtk.Button(
+            icon_name="list-add-symbolic", tooltip_text="Add Images (Ctrl+O)"
+        )
+        self.header_add_btn.connect("clicked", lambda _b: self.open_file_dialog())
+        header.pack_start(self.header_add_btn)
 
-        self.mode_box = Gtk.Box(css_classes=["linked"])
+        self.mode_box = Gtk.Box(css_classes=["mode-switcher"], valign=Gtk.Align.CENTER)
         self.mode_buttons: dict[str, Gtk.ToggleButton] = {}
         first: Gtk.ToggleButton | None = None
         for mode, label, tip in (
@@ -126,7 +173,7 @@ class MainWindow(Adw.ApplicationWindow):
             button.connect("toggled", self._on_mode_toggled, mode)
             self.mode_box.append(button)
             self.mode_buttons[mode] = button
-        header.pack_start(self.mode_box)
+        header.set_title_widget(self.mode_box)
 
         menu = Gio.Menu()
         section = Gio.Menu()
@@ -142,84 +189,247 @@ class MainWindow(Adw.ApplicationWindow):
             icon_name="open-menu-symbolic", menu_model=menu, tooltip_text="Main Menu", primary=True
         )
         header.pack_end(menu_btn)
-        settings_btn = Gtk.Button(icon_name="emblem-system-symbolic", tooltip_text="Settings")
-        settings_btn.set_action_name("app.preferences")
-        header.pack_end(settings_btn)
+
+        # The processing device, quietly: a chip that opens the settings.
+        self.device_label = Gtk.Label(
+            label="Detecting device…", ellipsize=Pango.EllipsizeMode.END, max_width_chars=22
+        )
+        chip = Gtk.Box(spacing=6)
+        chip.append(Gtk.Image(icon_name="computer-symbolic"))
+        chip.append(self.device_label)
+        self.device_btn = Gtk.Button(child=chip, valign=Gtk.Align.CENTER)
+        self.device_btn.add_css_class("device-chip")
+        self.device_btn.add_css_class("flat")
+        self.device_btn.set_action_name("app.preferences")
+        header.pack_end(self.device_btn)
 
         open_action = Gio.SimpleAction.new("open", None)
         open_action.connect("activate", lambda *_: self.open_file_dialog())
         self.add_action(open_action)
         self.app.set_accels_for_action("win.open", ["<Control>o"])
+        sidebar_action = Gio.SimpleAction.new("toggle-sidebar", None)
+        sidebar_action.connect(
+            "activate", lambda *_: self.sidebar_btn.set_active(not self.sidebar_btn.get_active())
+        )
+        self.add_action(sidebar_action)
+        self.app.set_accels_for_action("win.toggle-sidebar", ["F9"])
         return header
 
     def _build_empty_page(self) -> Gtk.Widget:
-        page = Adw.StatusPage(
-            icon_name=APP_ID,
-            title="Drop images here",
-            description="PNG, JPEG, WebP, TIFF or BMP — single images or whole folders.",
-        )
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, halign=Gtk.Align.CENTER)
-        select = Gtk.Button(label="Select Images", halign=Gtk.Align.CENTER)
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        card.add_css_class("drop-card")
+        icon = Gtk.Image(icon_name=APP_ID, pixel_size=96, margin_bottom=12)
+        card.append(icon)
+        self.empty_title = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.empty_title.add_css_class("title-1")
+        card.append(self.empty_title)
+        self.empty_description = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER)
+        self.empty_description.set_max_width_chars(46)
+        self.empty_description.add_css_class("dim-label")
+        card.append(self.empty_description)
+        select = Gtk.Button(label="Select Images", halign=Gtk.Align.CENTER, margin_top=18)
         select.add_css_class("pill")
         select.add_css_class("suggested-action")
         select.connect("clicked", lambda _b: self.open_file_dialog())
-        box.append(select)
-        self.privacy_label = Gtk.Label(
-            label="🔒 Your images stay on your computer.",
-            wrap=True,
-            justify=Gtk.Justification.CENTER,
-        )
+        card.append(select)
+        hint = Gtk.Label(label="or drop files and folders anywhere · Ctrl+O")
+        hint.add_css_class("caption")
+        hint.add_css_class("dim-label")
+        card.append(hint)
+        self.privacy_label = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, margin_top=18)
         self.privacy_label.set_max_width_chars(60)
         self.privacy_label.add_css_class("dim-label")
         self.privacy_label.add_css_class("privacy-note")
-        box.append(self.privacy_label)
-        page.set_child(box)
-        self.empty_page = page
-        return page
-
-    def _build_queue_page(self) -> Gtk.Widget:
-        self.listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.listbox.add_css_class("boxed-list")
-        self.listbox.connect("row-activated", lambda _l, row: self.open_preview(row))
-        self.queue_title = Gtk.Label(xalign=0)
-        self.queue_title.add_css_class("heading")
-        header = Gtk.Box(spacing=6, margin_bottom=8)
-        header.append(self.queue_title)
-        content = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            margin_top=12,
-            margin_bottom=12,
-            margin_start=12,
-            margin_end=12,
+        card.append(self.privacy_label)
+        return Adw.Clamp(
+            maximum_size=600,
+            child=card,
+            valign=Gtk.Align.CENTER,
+            margin_top=24,
+            margin_bottom=24,
+            margin_start=24,
+            margin_end=24,
         )
-        content.append(header)
-        self.bw_banner = BlackAndWhiteBanner(self._on_bw_choice)
-        content.append(self.bw_banner)
-        content.append(self.listbox)
-        clamp = Adw.Clamp(maximum_size=960, child=content)
-        return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
 
-    def _labeled(self, label: str, widget: Gtk.Widget) -> Gtk.Box:
-        box = Gtk.Box(spacing=8)
+    def _build_workspace(self) -> Gtk.Widget:
+        self.split_view = Adw.OverlaySplitView(
+            sidebar=self._build_sidebar(),
+            content=self._build_stage(),
+            min_sidebar_width=280,
+            max_sidebar_width=360,
+            sidebar_width_fraction=0.27,
+        )
+        self.split_view.bind_property(
+            "show-sidebar",
+            self.sidebar_btn,
+            "active",
+            GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.BIDIRECTIONAL,
+        )
+        return self.split_view
+
+    def _build_sidebar(self) -> Gtk.Widget:
+        self.listbox = Gtk.ListBox(
+            selection_mode=Gtk.SelectionMode.SINGLE, activate_on_single_click=False
+        )
+        self.listbox.add_css_class("navigation-sidebar")
+        self.listbox.connect("row-activated", lambda _l, row: self.open_preview(row))
+        self.listbox.connect("row-selected", self._on_row_selected)
+
+        header = Gtk.Box(spacing=6)
+        header.add_css_class("sidebar-header")
+        titles = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
+        self.queue_title = Gtk.Label(label="Photos", xalign=0)
+        self.queue_title.add_css_class("heading")
+        self.queue_subtitle = Gtk.Label(xalign=0)
+        self.queue_subtitle.add_css_class("caption")
+        self.queue_subtitle.add_css_class("dim-label")
+        titles.append(self.queue_title)
+        titles.append(self.queue_subtitle)
+        header.append(titles)
+        self.clear_btn = Gtk.Button(
+            icon_name="edit-clear-all-symbolic",
+            tooltip_text="Clear Finished Images",
+            valign=Gtk.Align.CENTER,
+        )
+        self.clear_btn.add_css_class("flat")
+        self.clear_btn.connect("clicked", lambda _b: self.clear_finished())
+        header.append(self.clear_btn)
+        add = Gtk.Button(
+            icon_name="list-add-symbolic", tooltip_text="Add Images", valign=Gtk.Align.CENTER
+        )
+        add.add_css_class("flat")
+        add.connect("clicked", lambda _b: self.open_file_dialog())
+        header.append(add)
+
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sidebar.add_css_class("photo-sidebar")
+        sidebar.append(header)
+        sidebar.append(
+            Gtk.ScrolledWindow(
+                child=self.listbox, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True
+            )
+        )
+        return sidebar
+
+    def _build_stage(self) -> Gtk.Widget:
+        self.stage_picture = Gtk.Picture(
+            content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True, vexpand=True
+        )
+        self.stage_picture.add_css_class("stage-picture")
+        overlay = Gtk.Overlay(child=self.stage_picture)
+
+        self.stage_spinner = Gtk.Spinner(
+            halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, width_request=32, height_request=32
+        )
+        overlay.add_overlay(self.stage_spinner)
+
+        self.stage_badge = Gtk.Label(halign=Gtk.Align.START, valign=Gtk.Align.START)
+        self.stage_badge.add_css_class("stage-chip")
+        self.stage_badge.add_css_class("stage-badge")
+        overlay.add_overlay(self.stage_badge)
+
+        # Bottom row: what is shown (left) and what can be done with it (right).
+        bottom = Gtk.Box(spacing=8, valign=Gtk.Align.END)
+        bottom.add_css_class("stage-bottom")
+        self.stage_info = Gtk.Label(
+            halign=Gtk.Align.START, hexpand=True, ellipsize=Pango.EllipsizeMode.MIDDLE
+        )
+        self.stage_info.add_css_class("stage-chip")
+        self.stage_info.add_css_class("stage-info")
+        self.stage_info.add_css_class("numeric")
+        bottom.append(self.stage_info)
+
+        tools = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
+        tools.add_css_class("stage-chip")
+        tools.add_css_class("stage-tools")
+        self.original_btn = Gtk.ToggleButton(
+            label="Original", tooltip_text="Show the original without the look"
+        )
+        self.original_btn.connect("toggled", lambda _b: self._show_stage_texture())
+        self.stage_compare_btn = Gtk.Button(
+            icon_name="view-dual-symbolic", tooltip_text="Compare and Zoom"
+        )
+        self.stage_compare_btn.connect(
+            "clicked", lambda _b: self._stage_row and self.open_preview(self._stage_row)
+        )
+        self.stage_folder_btn = Gtk.Button(
+            icon_name="folder-open-symbolic", tooltip_text="Show in Folder"
+        )
+        self.stage_folder_btn.connect(
+            "clicked", lambda _b: self._stage_row and self._stage_row.show_in_folder()
+        )
+        for button in (self.original_btn, self.stage_compare_btn, self.stage_folder_btn):
+            button.add_css_class("flat")
+            tools.append(button)
+        self.stage_tools = tools
+        bottom.append(tools)
+        overlay.add_overlay(bottom)
+        overlay.add_css_class("stage")
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.bw_banner = BlackAndWhiteBanner(self._on_bw_choice)
+        self.bw_banner.set_margin_top(12)
+        self.bw_banner.set_margin_start(12)
+        self.bw_banner.set_margin_end(12)
+        content.append(self.bw_banner)
+        content.append(overlay)
+        return content
+
+    def _labeled(self, label: str, widget: Gtk.Widget, expand: bool = True) -> Gtk.Box:
+        box = Gtk.Box(spacing=10)
         title = Gtk.Label(label=label, xalign=0, width_chars=6)
         title.add_css_class("dim-label")
         box.append(title)
-        widget.set_hexpand(True)
+        widget.set_hexpand(expand)
         box.append(widget)
         return box
 
-    def _build_controls(self) -> Gtk.Widget:
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        panel.add_css_class("control-panel")
+    def _segmented(
+        self, labels: list[str], on_selected: Callable[[int], None]
+    ) -> list[Gtk.ToggleButton]:
+        """Grouped toggle buttons; ``on_selected(index)`` when the user picks one."""
 
-        self.options_box = Gtk.Box(spacing=18, homogeneous=False)
-        self.scale_dd = Gtk.DropDown.new_from_strings([f"{s}×" for s in SCALES])
-        self.scale_dd.connect("notify::selected", self._on_option_changed)
+        def toggled(button: Gtk.ToggleButton, index: int) -> None:
+            if button.get_active() and not self._syncing:
+                on_selected(index)
+
+        buttons: list[Gtk.ToggleButton] = []
+        group: Gtk.ToggleButton | None = None
+        for index, label in enumerate(labels):
+            button = Gtk.ToggleButton(label=label, group=group)
+            group = group or button
+            button.connect("toggled", toggled, index)
+            buttons.append(button)
+        return buttons
+
+    def _segment_box(self, buttons: list[Gtk.ToggleButton]) -> Gtk.Box:
+        box = Gtk.Box(css_classes=["linked", "segmented"], halign=Gtk.Align.START)
+        for button in buttons:
+            box.append(button)
+        return box
+
+    def _build_controls(self) -> Gtk.Widget:
+        dock = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        dock.add_css_class("dock")
+
+        # Enhance: what happens to the photo (restoration, scale, AI model).
+        self.restore_panel = RestorationPanel(self.app, self.show_restoration_options)
+        self.scale_buttons = self._segmented([f"{s}×" for s in SCALES], self._on_scale_selected)
         self.model_list = Gtk.StringList()
         self.model_dd = Gtk.DropDown(model=self.model_list)
-        self.model_dd.connect("notify::selected", self._on_option_changed)
-        self.format_dd = Gtk.DropDown.new_from_strings([name for _, name in FORMATS])
-        self.format_dd.connect("notify::selected", self._on_option_changed)
+        self.model_dd.connect("notify::selected", self._on_model_changed)
+        self.enhance_box = Gtk.Box(spacing=24)
+        self.scale_box = self._labeled("Scale", self._segment_box(self.scale_buttons), False)
+        self.enhance_box.append(self.scale_box)
+        self.enhance_box.append(self._labeled("Model", self.model_dd))
+        enhance = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        enhance.append(self.restore_panel)
+        enhance.append(self.enhance_box)
+
+        # Export: file format and destination.
+        self.format_buttons = self._segmented(
+            [name for _, name in FORMATS], self._on_format_selected
+        )
         self.output_btn = Gtk.Button()
         self.output_label = Gtk.Label(ellipsize=Pango.EllipsizeMode.END, xalign=0)
         out_content = Gtk.Box(spacing=6)
@@ -235,24 +445,45 @@ class MainWindow(Adw.ApplicationWindow):
         output_row.append(self.output_btn)
         output_row.append(self.output_reset)
         self.output_btn.set_hexpand(True)
+        self.export_box = Gtk.Box(spacing=24)
+        self.export_box.append(
+            self._labeled("Format", self._segment_box(self.format_buttons), False)
+        )
+        self.export_box.append(self._labeled("Output", output_row))
 
-        self.restore_panel = RestorationPanel(self.app, self.show_restoration_options)
-        panel.append(self.restore_panel)
-        self.scale_box = self._labeled("Scale", self.scale_dd)
-        self.options_box.append(self.scale_box)
-        self.options_box.append(self._labeled("Model", self.model_dd))
-        self.options_box.append(self._labeled("Format", self.format_dd))
-        self.options_box.append(self._labeled("Output", output_row))
-        panel.append(self.options_box)
         self.lighting = LightingControls(self.app)
-        panel.append(self.lighting)
         self.camera_look = CameraLookControls(self.app)
-        panel.append(self.camera_look)
 
-        # Progress area (only while a batch is running / just finished)
+        self.panel_stack = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.CROSSFADE,
+            vhomogeneous=False,
+            interpolate_size=True,
+        )
+        for key, widget in (
+            ("enhance", enhance),
+            ("light", self.lighting),
+            ("look", self.camera_look),
+            ("export", self.export_box),
+        ):
+            self.panel_stack.add_named(Adw.Clamp(maximum_size=1000, child=widget), key)
+        self.panel_stack.add_css_class("dock-panel")
+        # Tall panels (narrow windows) scroll rather than squeezing the photo.
+        panel_scroll = Gtk.ScrolledWindow(
+            child=self.panel_stack,
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            propagate_natural_height=True,
+            max_content_height=320,
+        )
+        self.panel_revealer = Gtk.Revealer(
+            transition_type=Gtk.RevealerTransitionType.SLIDE_UP, child=panel_scroll
+        )
+        dock.append(self.panel_revealer)
+
+        # Progress (only while a batch is running / just finished)
         self.progress_revealer = Gtk.Revealer(transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
         progress_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.overall_bar = Gtk.ProgressBar(show_text=True)
+        progress_box.add_css_class("dock-progress")
+        self.overall_bar = Gtk.ProgressBar()
         line = Gtk.Box(spacing=12)
         self.current_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.current_label.add_css_class("caption")
@@ -261,15 +492,39 @@ class MainWindow(Adw.ApplicationWindow):
         self.overall_label.add_css_class("numeric")
         line.append(self.current_label)
         line.append(self.overall_label)
-        progress_box.append(self.overall_bar)
         progress_box.append(line)
+        progress_box.append(self.overall_bar)
         self.progress_revealer.set_child(progress_box)
-        panel.append(self.progress_revealer)
+        dock.append(self.progress_revealer)
 
-        self.buttons_box = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
-        self.start_btn = Gtk.Button(label="Start Upscaling")
+        # The bar: task tabs (each showing its current setting) and the action.
+        self.dock_bar = Gtk.Box(spacing=16)
+        self.dock_bar.add_css_class("dock-bar")
+        self.tabs_box = Gtk.Box(spacing=4, homogeneous=True, hexpand=True, halign=Gtk.Align.START)
+        self.tab_buttons: dict[str, Gtk.ToggleButton] = {}
+        self.tab_values: dict[str, Gtk.Label] = {}
+        for key, title, tip in TABS:
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+            heading = Gtk.Label(label=title.upper(), xalign=0)
+            heading.add_css_class("dock-tab-title")
+            value = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=22)
+            value.add_css_class("dock-tab-value")
+            content.append(heading)
+            content.append(value)
+            button = Gtk.ToggleButton(child=content, tooltip_text=tip)
+            button.add_css_class("flat")
+            button.add_css_class("dock-tab")
+            button.connect("toggled", self._on_tab_toggled, key)
+            self.tabs_box.append(button)
+            self.tab_buttons[key] = button
+            self.tab_values[key] = value
+        self.dock_bar.append(self.tabs_box)
+
+        self.buttons_box = Gtk.Box(spacing=8, halign=Gtk.Align.END, valign=Gtk.Align.CENTER)
+        self.start_btn = Gtk.Button(label="Upscale", hexpand=True)
         self.start_btn.add_css_class("pill")
         self.start_btn.add_css_class("suggested-action")
+        self.start_btn.add_css_class("primary-action")
         self.start_btn.connect("clicked", lambda _b: self.start())
         self.pause_btn = Gtk.Button(label="Pause")
         self.pause_btn.add_css_class("pill")
@@ -281,10 +536,81 @@ class MainWindow(Adw.ApplicationWindow):
         self.retry_btn = Gtk.Button(label="Retry Failed")
         self.retry_btn.add_css_class("pill")
         self.retry_btn.connect("clicked", lambda _b: self.retry_failed())
-        for btn in (self.start_btn, self.pause_btn, self.cancel_btn, self.retry_btn):
+        for btn in (self.retry_btn, self.pause_btn, self.cancel_btn, self.start_btn):
             self.buttons_box.append(btn)
-        panel.append(self.buttons_box)
-        return panel
+        self.dock_bar.append(self.buttons_box)
+        dock.append(self.dock_bar)
+
+        escape = Gtk.ShortcutController(scope=Gtk.ShortcutScope.MANAGED)
+        escape.add_shortcut(
+            Gtk.Shortcut(
+                trigger=Gtk.ShortcutTrigger.parse_string("Escape"),
+                action=Gtk.CallbackAction.new(lambda *_: self.show_panel(None) or True),
+            )
+        )
+        dock.add_controller(escape)
+        return dock
+
+    # --- the dock ----------------------------------------------------------
+    def show_panel(self, key: str | None) -> None:
+        """Open one task's controls in the dock (None: collapse them)."""
+        self._syncing = True
+        try:
+            for name, button in self.tab_buttons.items():
+                button.set_active(name == key)
+        finally:
+            self._syncing = False
+        if key is not None:
+            self.panel_stack.set_visible_child_name(key)
+        self.panel_revealer.set_reveal_child(key is not None)
+
+    def _on_tab_toggled(self, button: Gtk.ToggleButton, key: str) -> None:
+        if self._syncing:
+            return
+        if button.get_active():
+            self.show_panel(key)
+        elif self.panel_stack.get_visible_child_name() == key:
+            self.show_panel(None)  # clicking the open tab again folds it away
+
+    def _update_tab_values(self) -> None:
+        """Each tab shows its current setting: the whole recipe at a glance."""
+        settings = self.app.settings
+        if self.restoring:
+            _colorize, upscale = rs.preset_flags(settings.restore_preset)
+            enhance = (
+                f"{rs.PRESET_LABELS[settings.restore_preset]} · "
+                f"{rs.LEVEL_LABELS[settings.restore_level]}"
+            )
+            if upscale:
+                enhance += f" · {settings.restore_scale}×"
+        else:
+            names = dict(self._families())
+            enhance = f"{settings.scale}× · {names.get(settings.model, settings.model)}"
+        light = settings.lighting()
+        profiles = {p.id: p.name for p in lighting.all_profiles()}
+        light_text = profiles.get(light.profile, "Original")
+        if light.profile not in (lighting.ORIGINAL, lighting.CUSTOM):
+            light_text += f" · {settings.lighting_intensity}%"
+        look = settings.camera_look_settings()
+        look_text = look.name()
+        if look.look not in (cl.ORIGINAL, cl.CUSTOM):
+            look_text += f" · {settings.camera_look_intensity}%"
+        if look.look != cl.ORIGINAL and settings.camera_look_grain != cl.GRAIN_AUTO:
+            look_text += " · " + GRAIN_LABELS[settings.camera_look_grain]
+        fmt = dict(FORMATS)[settings.output_format]
+        values = {
+            "enhance": (enhance, False),
+            "light": (light_text, light.active),
+            "look": (look_text, look.active),
+            "export": (f"{fmt} · {self.output_label.get_label()}", False),
+        }
+        for key, (text, modified) in values.items():
+            self.tab_values[key].set_label(text)
+            self.tab_values[key].set_tooltip_text(text)
+            if modified:
+                self.tab_buttons[key].add_css_class("modified")
+            else:
+                self.tab_buttons[key].remove_css_class("modified")
 
     # --- settings <-> controls ---------------------------------------------
     def _families(self) -> list[tuple[str, str]]:
@@ -318,9 +644,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._syncing = True
         try:
             self.mode_buttons[settings.mode].set_active(True)
-            self.scale_dd.set_selected(SCALES.index(scale) if scale in SCALES else 1)
+            self.scale_buttons[SCALES.index(scale) if scale in SCALES else 1].set_active(True)
             fmt_ids = [f for f, _ in FORMATS]
-            self.format_dd.set_selected(fmt_ids.index(settings.output_format))
+            self.format_buttons[fmt_ids.index(settings.output_format)].set_active(True)
             if settings.output_dir:
                 self.output_label.set_label(Path(settings.output_dir).name or settings.output_dir)
                 self.output_btn.set_tooltip_text(settings.output_dir)
@@ -337,6 +663,8 @@ class MainWindow(Adw.ApplicationWindow):
             row.set_scale(output_scale, show_monochrome=restoring)
         if self.app.device_report:
             self._on_devices(self.app.device_report)
+        # The tab values and the stage follow in _on_look_changed: settings
+        # changes notify the lighting listeners too (after _reset_stale).
         self._update_state()
 
     def _sync_mode(self) -> None:
@@ -347,14 +675,15 @@ class MainWindow(Adw.ApplicationWindow):
         self.restore_panel.set_visible(restoring)
         self.scale_box.set_visible(not restoring or upscale)
         if restoring:
-            self.empty_page.set_title("Drop old photographs here")
-            self.empty_page.set_description(
-                "Restore faded, scratched and damaged photos — black and white or colour."
+            self.empty_title.set_label("Bring old photographs back")
+            self.empty_description.set_label(
+                "Drop faded, scratched or damaged photos — black and white or colour."
             )
             self.privacy_label.set_label(PRIVACY_TEXT)
         else:
-            self.empty_page.set_title("Drop images here")
-            self.empty_page.set_description(
+            self.empty_title.set_label("Drop photos to begin")
+            self.empty_description.set_label(
+                "Upscale with AI, then give them light and a camera look. "
                 "PNG, JPEG, WebP, TIFF or BMP — single images or whole folders."
             )
             self.privacy_label.set_label("🔒 Your images stay on your computer.")
@@ -406,19 +735,28 @@ class MainWindow(Adw.ApplicationWindow):
         if stale:
             self._update_state()
 
-    def _on_option_changed(self, *_args: object) -> None:
+    def _on_look_changed(self) -> None:
+        self._update_tab_values()
+        self._refresh_stage()
+
+    def _on_scale_selected(self, index: int) -> None:
+        if self.restoring:
+            self.app.settings.restore_scale = SCALES[index]
+        else:
+            self.app.settings.scale = SCALES[index]
+        self.app.settings_changed()
+
+    def _on_format_selected(self, index: int) -> None:
+        self.app.settings.output_format = FORMATS[index][0]
+        self.app.settings_changed()
+
+    def _on_model_changed(self, *_args: object) -> None:
         if self._syncing:
             return
-        settings = self.app.settings
-        if self.restoring:
-            settings.restore_scale = SCALES[self.scale_dd.get_selected()]
-        else:
-            settings.scale = SCALES[self.scale_dd.get_selected()]
         families = self._families()
         if self.model_dd.get_selected() < len(families):
-            settings.model = families[self.model_dd.get_selected()][0]
-        settings.output_format = FORMATS[self.format_dd.get_selected()][0]
-        self.app.settings_changed()
+            self.app.settings.model = families[self.model_dd.get_selected()][0]
+            self.app.settings_changed()
 
     def choose_output_folder(self) -> None:
         dialog = Gtk.FileDialog(title="Choose Output Folder", modal=True)
@@ -439,12 +777,190 @@ class MainWindow(Adw.ApplicationWindow):
         self.app.settings.output_dir = folder
         self.app.settings_changed()
 
+    def _show_device(self, device: dm.DeviceInfo) -> None:
+        label = device.label()
+        self.device_label.set_label(label)
+        self.device_btn.set_tooltip_text(f"Processing device: {label}\nChange it in Preferences")
+
     def _on_devices(self, _report: dm.DeviceReport) -> None:
         if self.running and self._upscaler is not None:
             device = self._upscaler.device
         else:
             device = self.app.selected_device()
-        self.window_title.set_subtitle(f"Processing device: {device.label()}")
+        self._show_device(device)
+
+    # --- the stage ---------------------------------------------------------
+    def _on_row_selected(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow | None) -> None:
+        if row is None:
+            return  # keep showing the last photo until another is chosen
+        assert isinstance(row, QueueRow)
+        self._stage_row = row
+        self._refresh_stage()
+
+    def _select_some_row(self) -> None:
+        """Keep a photo on the stage: the first one ready, when none is."""
+        if self._stage_row in self.rows:
+            return
+        self._stage_row = None
+        row = next((r for r in self.rows if r.ready), None)
+        if row is not None:
+            self.listbox.select_row(row)
+        else:
+            self._refresh_stage()
+
+    def _stage_target(self, row: QueueRow) -> tuple[Path, bool]:
+        """The file the stage shows for ``row`` and whether it is the result."""
+        result = row.item.result
+        if (
+            result is not None
+            and row.item.status in (ItemStatus.DONE, ItemStatus.SKIPPED)
+            and result.output.exists()
+        ):
+            return result.output, True
+        return row.item.path, False
+
+    def _refresh_stage(self) -> None:
+        """Show the selected photo: its result once processed, otherwise the
+        original with the lighting and camera look previewed live."""
+        row = self._stage_row
+        if row is None or not row.ready:
+            self._stage_source = None
+            self._stage_base = self._stage_base_texture = self._stage_look_texture = None
+            self._stage_generation += 1
+            self.stage_picture.set_paintable(None)
+            self.stage_spinner.set_spinning(row is not None and row.load_error is None)
+            for widget in (self.stage_badge, self.stage_info, self.stage_tools):
+                widget.set_visible(False)
+            return
+        target, is_output = self._stage_target(row)
+        self._update_stage_overlays()
+        if target != self._stage_source:
+            self._stage_source = target
+            self._stage_base = self._stage_base_texture = self._stage_look_texture = None
+            self._stage_shown_look = None
+            self._stage_generation += 1
+            generation = self._stage_generation
+            self.stage_picture.set_paintable(None)
+            self.stage_spinner.set_spinning(True)
+
+            def done(result: tuple) -> None:
+                if generation != self._stage_generation:
+                    return
+                image, _size = result
+                self.stage_spinner.set_spinning(False)
+                self._stage_base = image
+                self._stage_is_output = is_output
+                self._stage_base_texture = texture_from_pil(image)
+                self._stage_look_texture = None
+                self._stage_shown_look = None
+                self._render_stage_look()
+                self._update_stage_overlays()
+
+            def failed(exc: BaseException) -> None:
+                if generation == self._stage_generation:
+                    self.stage_spinner.set_spinning(False)
+                    self.stage_badge.set_label("Preview Unavailable")
+                    self.stage_badge.remove_css_class("finished")
+                    log.warning("Stage preview failed: %s", exc)
+
+            run_in_thread(
+                load_preview, target, STAGE_SIZE, on_done=done, on_error=failed, name="stage"
+            )
+            return
+        self._render_stage_look()
+
+    def _wanted_stage_look(self) -> tuple | None:
+        """(lighting, look, output size) to preview on the stage; None: nothing."""
+        row = self._stage_row
+        if self._stage_is_output or row is None or row.info is None:
+            return None
+        settings = self.app.settings
+        adjustments = settings.lighting().adjustments()
+        recipe = settings.camera_look_settings().recipe()
+        if adjustments.is_neutral and recipe.is_neutral:
+            return None
+        scale = settings.processing_options().output_scale
+        return adjustments, recipe, (row.info.width * scale, row.info.height * scale)
+
+    def _render_stage_look(self) -> None:
+        base = self._stage_base
+        if base is None:
+            return
+        wanted = self._wanted_stage_look()
+        if wanted is None or wanted == self._stage_shown_look:
+            if wanted is None:
+                self._stage_look_texture = None
+                self._stage_shown_look = None
+            self._show_stage_texture()
+            return
+        if self._stage_busy:
+            # Picked up when the running render finishes; meanwhile a newly
+            # loaded photo shows without the look rather than not at all.
+            self._show_stage_texture()
+            return
+        self._stage_busy = True
+        adjustments, recipe, output = wanted
+
+        def done(img: Image.Image) -> None:
+            self._stage_busy = False
+            if base is self._stage_base:
+                self._stage_look_texture = texture_from_pil(img)
+                self._stage_shown_look = wanted
+            self._render_stage_look()  # the settings or photo may have moved on
+
+        def failed(exc: BaseException) -> None:
+            self._stage_busy = False
+            log.warning("Stage look preview failed: %s", exc)
+            if base is self._stage_base and self._wanted_stage_look() == wanted:
+                # Nothing valid to show for these settings: the plain photo.
+                self._stage_look_texture = None
+                self._stage_shown_look = None
+                self._show_stage_texture()
+            else:
+                self._render_stage_look()  # moved on meanwhile: render that
+
+        run_in_thread(
+            lambda: cl.apply_to_pil(base, recipe, adjustments, quick=True, output=output),
+            on_done=done,
+            on_error=failed,
+            name="stage-look",
+        )
+
+    def _show_stage_texture(self) -> None:
+        looked = self._stage_look_texture is not None
+        original = looked and self.original_btn.get_active()
+        texture = self._stage_look_texture if looked and not original else self._stage_base_texture
+        self.stage_picture.set_paintable(texture)
+        self._update_stage_overlays()
+
+    def _update_stage_overlays(self) -> None:
+        row = self._stage_row
+        if row is None or not row.ready:
+            return
+        _target, is_output = self._stage_target(row)
+        looked = self._stage_look_texture is not None and not is_output
+        if is_output and row.item.result is not None:
+            badge = "Restored" if row.item.result.restored else "Upscaled"
+        elif looked and self.original_btn.get_active():
+            badge = "Original"
+        elif looked:
+            badge = "Live Preview"
+        else:
+            badge = "Original"
+        self.stage_badge.set_label(badge)
+        if is_output:
+            self.stage_badge.add_css_class("finished")
+        else:
+            self.stage_badge.remove_css_class("finished")
+        self.stage_info.set_label(f"{row.item.path.name}   {row.details.get_label()}")
+        self.stage_info.set_tooltip_text(str(row.item.path))
+        self.original_btn.set_visible(looked)
+        self.stage_folder_btn.set_visible(is_output)
+        self.stage_compare_btn.set_tooltip_text(
+            "Compare Before / After" if is_output else "Compare and Zoom"
+        )
+        for widget in (self.stage_badge, self.stage_info, self.stage_tools):
+            widget.set_visible(True)
 
     # --- adding / removing images -----------------------------------------
     def open_file_dialog(self) -> None:
@@ -504,21 +1020,34 @@ class MainWindow(Adw.ApplicationWindow):
 
         def ready(info: object, thumb: object, mono: bool, r: QueueRow = row) -> None:
             r.set_info(info, thumb, mono)
+            if r is self._stage_row:
+                self._refresh_stage()
+            self._select_some_row()
             self._update_look_sample()
             self._update_bw_banner()
             self._update_state()
 
         def failed(err: UpscalerError, r: QueueRow = row) -> None:
             r.set_load_error(err)
+            if r is self._stage_row:
+                self._refresh_stage()  # stops the spinner
             self._update_state()
 
         self.thumbnails.request(item.path, ready, failed)
 
     def remove_row(self, row: QueueRow) -> None:
+        if self._remove(row):
+            self._after_removal()
+
+    def _remove(self, row: QueueRow) -> bool:
         if row.item.status in (ItemStatus.PROCESSING, ItemStatus.QUEUED):
-            return
+            return False
         self.rows.remove(row)
         self.listbox.remove(row)
+        return True
+
+    def _after_removal(self) -> None:
+        self._select_some_row()
         self._update_look_sample()
         self._update_bw_banner()
         self._update_state()
@@ -548,9 +1077,13 @@ class MainWindow(Adw.ApplicationWindow):
         )
 
     def clear_finished(self) -> None:
-        for row in list(self.rows):
-            if row.item.status in (ItemStatus.DONE, ItemStatus.SKIPPED):
-                self.remove_row(row)
+        removed = [
+            row
+            for row in list(self.rows)
+            if row.item.status in (ItemStatus.DONE, ItemStatus.SKIPPED) and self._remove(row)
+        ]
+        if removed:
+            self._after_removal()  # once: no stage decodes for rows on their way out
 
     def show_row_error(self, row: QueueRow) -> None:
         if row.item.error:
@@ -604,7 +1137,7 @@ class MainWindow(Adw.ApplicationWindow):
         return restorer, restoration, options
 
     def _on_device_fallback(self, device: dm.DeviceInfo, reason: str) -> None:
-        self.window_title.set_subtitle(f"Processing device: {device.label()}")
+        self._show_device(device)
         self.toasts.add_toast(Adw.Toast(title=f"{reason} — continuing on the CPU", timeout=6))
         self._upscaler_key = None  # rebuild with the preferred device next time
 
@@ -677,7 +1210,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.processor = BatchProcessor(
             upscaler, options, lambda ev: idle(self._on_batch_event, ev), workers=workers
         )
-        self.window_title.set_subtitle(f"Processing device: {upscaler.device.label()}")
+        self._show_device(upscaler.device)
         self._inhibit_cookie = self.app.inhibit(
             self,
             Gtk.ApplicationInhibitFlags.SUSPEND,
@@ -819,13 +1352,14 @@ class MainWindow(Adw.ApplicationWindow):
         row = self._row_for(ev.item)
         if row is not None:
             row.refresh()
+            if row is self._stage_row and ev.kind is not EventKind.ITEM_PROGRESS:
+                self._refresh_stage()  # shows the result as soon as it is saved
         self.overall_bar.set_fraction(ev.fraction)
-        self.overall_bar.set_text(f"{ev.fraction * 100:.0f}%")
-        self.overall_label.set_label(f"Overall: {ev.completed} / {ev.total}")
+        self.overall_label.set_label(f"{ev.completed} of {ev.total} · {ev.fraction * 100:.0f}%")
         if ev.kind in (EventKind.ITEM_STARTED, EventKind.ITEM_PROGRESS) and ev.item:
             paused = " (paused)" if self.processor and self.processor.paused else ""
             stage = f" — {ev.item.stage}" if ev.item.stage and ev.item.stage != "Starting" else ""
-            self.current_label.set_label(f"Current: {ev.item.path.name}{stage}{paused}")
+            self.current_label.set_label(f"{ev.item.path.name}{stage}{paused}")
         elif ev.kind is EventKind.PAUSED:
             self.current_label.set_label(
                 "Paused — the current image will continue where it stopped"
@@ -883,24 +1417,27 @@ class MainWindow(Adw.ApplicationWindow):
             for r in self.rows
             if r.ready and r.item.status not in (ItemStatus.DONE, ItemStatus.SKIPPED)
         )
-        self.queue_title.set_label(
+        self.queue_subtitle.set_label(
             f"{count} image{'s' if count != 1 else ''}" + (f" · {done} done" if done else "")
         )
+        self.sidebar_btn.set_visible(count > 0)
         self.start_btn.set_visible(not running)
         self.start_btn.set_sensitive(pending > 0)
-        action = "Restore Photos" if self.restoring else "Start Upscaling"
-        self.start_btn.set_label(f"{action} ({pending})" if pending and count > 1 else action)
+        verb = "Restore" if self.restoring else "Upscale"
+        if pending > 1:
+            self.start_btn.set_label(f"{verb} {pending} Photos")
+        elif pending == 1 and count > 1:
+            self.start_btn.set_label(f"{verb} 1 Photo")
+        else:
+            self.start_btn.set_label(verb)
         self.pause_btn.set_visible(running)
         self.pause_btn.set_label("Resume" if self.processor and self.processor.paused else "Pause")
         self.cancel_btn.set_visible(running)
         self.cancel_btn.set_sensitive(running and not self.processor.control.cancelled)
         self.retry_btn.set_visible(not running and failed > 0)
         self.clear_btn.set_sensitive(count > 0 and not running)
-        self.options_box.set_sensitive(not running)
-        self.restore_panel.set_sensitive(not running)
+        self.panel_stack.set_sensitive(not running)
         self.mode_box.set_sensitive(not running)
-        self.lighting.set_sensitive(not running)
-        self.camera_look.set_sensitive(not running)
         from pixelift.ui.preview import PreviewWindow
 
         for window in self.app.get_windows():

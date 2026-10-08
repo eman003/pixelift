@@ -173,15 +173,22 @@ class CompareView(Gtk.Widget):
         return self.fit_zoom() if self.zoom is None else self.zoom
 
     def set_zoom(self, zoom: float | None, anchor: tuple[float, float] | None = None) -> None:
-        """Zoom keeping the image point under ``anchor`` in place; zooming out
-        to (or past) the fitted size fits the image again."""
+        """Zoom keeping the image point under ``anchor`` in place.
+
+        Zoom ranges from the smaller of fit and 100 % (actual pixels) to
+        ``MAX_ZOOM``: a large photo zoomed out past fit fits again, a small one
+        can still be seen at 100 %.
+        """
+        if not self.image_size[0]:
+            return  # nothing on the stage
         fit = self.fit_zoom()
-        if zoom is None or zoom <= fit * 1.001:
+        if zoom is not None:
+            zoom = min(max(MAX_ZOOM, fit), max(zoom, min(fit, self._actual_zoom())))
+        if zoom is None or abs(zoom - fit) <= fit * 0.001:
             self.zoom = None
             self.center = (self.image_size[0] / 2, self.image_size[1] / 2)
         else:
             old = self.effective_zoom()
-            zoom = min(max(MAX_ZOOM, fit), zoom)
             if anchor is not None:
                 vx, vy = self._view_center()
                 ax, ay = anchor[0] - vx, anchor[1] - vy
@@ -193,9 +200,12 @@ class CompareView(Gtk.Widget):
         self._update_cursor()
         self._view_changed()
 
-    def actual_pixels(self, anchor: tuple[float, float] | None = None) -> None:
+    def _actual_zoom(self) -> float:
         """1 image pixel = 1 physical screen pixel."""
-        self.set_zoom(1.0 / max(1, self.get_scale_factor()), anchor)
+        return 1.0 / max(1, self.get_scale_factor())
+
+    def actual_pixels(self, anchor: tuple[float, float] | None = None) -> None:
+        self.set_zoom(self._actual_zoom(), anchor)
 
     def zoom_by(self, factor: float) -> None:
         self.set_zoom(self.effective_zoom() * factor, self._view_center())
@@ -353,7 +363,7 @@ class CompareView(Gtk.Widget):
         self._update_cursor()
 
     def _on_click(self, _gesture: Gtk.GestureClick, n_press: int, x: float, y: float) -> None:
-        if n_press == 2:  # fit ↔ actual pixels, centred on the pointer
+        if n_press == 2 and self.image_size[0]:  # fit ↔ actual pixels, at the pointer
             if self.zoom is None:
                 self.actual_pixels((x, y))
             else:
@@ -361,7 +371,7 @@ class CompareView(Gtk.Widget):
 
     def _on_scroll(self, _ctrl: Gtk.EventControllerScroll, _dx: float, dy: float) -> bool:
         if not self.image_size[0]:
-            return False
+            return False  # nothing to zoom: let the stage scroll on
         self.set_zoom(self.effective_zoom() * (1.15**-dy), self._pointer)
         return True
 
@@ -375,9 +385,7 @@ class CompareView(Gtk.Widget):
         if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
             return False
         name = Gdk.keyval_name(keyval) or ""
-        if name == "c" and self.can_compare:
-            self.comparing = not self.comparing
-        elif name in ("Left", "Right", "Home", "End") and self.showing_split:
+        if name in ("Left", "Right", "Home", "End") and self.showing_split:
             step = {"Left": -KEY_SPLIT_STEP, "Right": KEY_SPLIT_STEP, "Home": -1, "End": 1}[name]
             self.split = min(1.0, max(0.0, self.split + step))
             self.queue_draw()

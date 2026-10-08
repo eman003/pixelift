@@ -28,6 +28,8 @@ def test_compare_view_zoom_math():
     from pixelift.ui.preview import CompareView
 
     view = CompareView()
+    view.zoom_by(2.0)
+    assert view.zoom is None  # nothing on the stage: nothing to zoom
     view.set_images((4000, 3000))
     assert view.zoom is None and view.center == (2000, 3000 / 2)
     view.set_zoom(2.0)

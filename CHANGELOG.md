@@ -4,6 +4,31 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.1] - 2026-10-08
+
+### Fixed
+
+- Photos smaller than the stage can be zoomed to 100 % again (double-click,
+  **1** or zooming out); zooming out still stops at fit for large photos.
+- After a restoration preview fails or is cancelled, the live look catches up
+  with lighting and look changes made while it ran.
+- Starting a batch also clears a finished restoration preview, and waits for
+  a cancelled one to let go of the engine instead of running alongside it; a
+  new preview waits the same way.
+- **Update Preview** appears exactly when the restoration settings, lighting,
+  look, model or scale differ from the preview's — not after unrelated changes
+  such as the output folder, and also for changes made while it was running.
+- Double-clicking a photo turns Compare on only when there is something to
+  compare (once the photo has loaded), instead of a hidden split appearing
+  later.
+- **C** toggles Compare from anywhere in the workspace (with or without Shift),
+  not only after clicking the photo.
+- Zoom keys and double-click do nothing on an empty stage.
+
+### Changed
+
+- README screenshots show the comparison on the stage.
+
 ## [1.7.0] - 2026-10-08
 
 ### Changed

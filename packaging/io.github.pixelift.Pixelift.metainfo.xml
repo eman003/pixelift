@@ -26,6 +26,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.7.1" date="2026-10-08">
+      <description>
+        <p>Fixes for the on-photo comparison: small photos zoom to 100 % again, the
+          restoration preview never runs alongside a batch and only asks to update when
+          its settings changed, and C toggles Compare from anywhere.</p>
+      </description>
+    </release>
     <release version="1.7.0" date="2026-10-08">
       <description>
         <p>Compare on the photo: the before/after divider, zoom and pan now work right on

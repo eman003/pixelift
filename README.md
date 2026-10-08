@@ -11,15 +11,15 @@ colour casts, faces, and optional colorization of black-and-white photos.
 > is no account, no telemetry and no analytics. The internet is only used —
 > when you ask — to download AI model files.
 
-![Pixelift's workspace: the selected photo with a Portra-inspired look previewed live, the photo sidebar, and the Enhance, Light, Look and Export tabs](docs/screenshots/workspace.png)
+![Pixelift's workspace: the selected photo compared on the stage — original on the left, the Portra-inspired look previewed live on the right — with the photo sidebar and the Preset, Enhance, Light, Look and Export tabs](docs/screenshots/workspace.png)
 
 <table>
   <tr>
-    <td><img src="docs/screenshots/restore.png" alt="Restore Photos mode: an old, scratched black-and-white print with the colorize choice and the restoration options"></td>
+    <td><img src="docs/screenshots/restore.png" alt="Restore Photos mode: an old, scratched black-and-white print compared with its restoration preview on the stage, with the colorize choice and the restoration options"></td>
     <td><img src="docs/screenshots/light-theme.png" alt="The light theme with the Golden Hour lighting profile previewed on a photo"></td>
   </tr>
   <tr>
-    <td align="center"><em>Restore Photos: dust, scratches, fading and faces — colorize only if you choose</em></td>
+    <td align="center"><em>Restore Photos: preview the restoration and compare it on the photo — colorize only if you choose</em></td>
     <td align="center"><em>Lighting profiles previewed live (light theme)</em></td>
   </tr>
 </table>

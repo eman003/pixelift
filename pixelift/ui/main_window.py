@@ -107,9 +107,12 @@ class MainWindow(Adw.ApplicationWindow):
         self._stage_busy = False
         self._stage_generation = 0
         # Restore mode: a reduced-size restoration on the after side.
-        self._restore_control: JobControl | None = None  # running
+        self._restore_control: JobControl | None = None  # running, not cancelled
+        self._restore_worker = False  # its thread is still busy (even once cancelled)
+        self._after_restore_worker: list[Callable[[], None]] = []  # waiting for it
         self._restore_shown = False
-        self._restore_stale = False  # settings changed since it was made
+        self._restore_key: tuple | None = None  # the settings the preview was made with
+        self._compare_pending = False  # double-clicked: compare once there is an after side
         # Startup: the startup screen shows at once; the workspace is built
         # right after its first frame, then the screen dissolves into it.
         self.ready = False
@@ -257,6 +260,10 @@ class MainWindow(Adw.ApplicationWindow):
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         drop.connect("drop", self._on_drop)
         self.toasts.add_controller(drop)
+        # Bubble phase: a focused text field gets its letters first.
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
 
         # The sidebar floats over the stage on smaller windows; on narrow ones
         # the controls stack vertically too. (Only the last matching applies.)
@@ -898,8 +905,6 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_look_changed(self) -> None:
         self._update_tab_values()
-        if self._restore_shown:
-            self._restore_stale = True  # offer to update the restoration preview
         self._refresh_stage()
 
     def _on_scale_selected(self, index: int) -> None:
@@ -957,6 +962,7 @@ class MainWindow(Adw.ApplicationWindow):
         if row is None:
             return  # keep showing the last photo until another is chosen
         assert isinstance(row, QueueRow)
+        self._compare_pending = False
         self._stage_row = row
         self._refresh_stage()
 
@@ -1073,7 +1079,7 @@ class MainWindow(Adw.ApplicationWindow):
     def _render_stage_look(self) -> None:
         """Bring the "after" side up to date with the lighting and camera look."""
         base = self._stage_base
-        if base is None or self._restore_shown or self._restore_control is not None:
+        if base is None or self._restore_active:
             return  # a result, or a restoration preview, is on the after side
         view = self.stage_view
         wanted = self._wanted_stage_look()
@@ -1097,9 +1103,7 @@ class MainWindow(Adw.ApplicationWindow):
             return cl.apply_to_pil(region, recipe, adjustments, frame=frame, output=output)
 
         def current() -> bool:
-            return base is self._stage_base and not (
-                self._restore_shown or self._restore_control is not None
-            )
+            return base is self._stage_base and not self._restore_active
 
         def done(img: Image.Image) -> None:
             self._stage_busy = False
@@ -1134,11 +1138,33 @@ class MainWindow(Adw.ApplicationWindow):
         )
 
     # --- restoration preview on the stage --------------------------------
+    @property
+    def _restore_active(self) -> bool:
+        """A restoration preview is running or holds the after side."""
+        return self._restore_shown or self._restore_control is not None
+
+    def _restoration_key(self) -> tuple:
+        """Everything a restoration preview depends on: when it differs from
+        the preview's, the preview is out of date."""
+        settings = self.app.settings
+        options = settings.processing_options()
+        return (
+            options.restoration or settings.restoration(),
+            options.lighting.adjustments(),
+            options.camera_look.recipe(),
+            options.model,
+            options.output_scale,
+        )
+
     def _preview_restoration(self) -> None:
         """Restore a reduced-size copy of the photo (no upscaling) with the
         current settings and compare it with the original on the stage."""
         base = self._stage_base
         if base is None or self._restore_control is not None:
+            return
+        if self._restore_worker:
+            # A cancelled preview is still winding down on the engine.
+            self._after_restore_worker.append(self._preview_restoration)
             return
         if self.running:
             show_error(
@@ -1164,8 +1190,10 @@ class MainWindow(Adw.ApplicationWindow):
         sw, sh = self.stage_view.before.source_size
         look_output = (sw * options.output_scale, sh * options.output_scale)
         path = self._stage_source
+        key = self._restoration_key()
         control = JobControl()
         self._restore_control = control
+        self._restore_worker = True
         self.stage_spinner.set_spinning(True)
         self._update_stage_overlays()
 
@@ -1187,44 +1215,51 @@ class MainWindow(Adw.ApplicationWindow):
             return Image.fromarray(result.rgb).convert("RGBA")
 
         def finish(img: Image.Image | None, exc: BaseException | None = None) -> None:
-            if self._restore_control is not control:
-                return  # dropped meanwhile: another photo, mode or a batch started
-            self._restore_control = None
-            self.stage_spinner.set_spinning(False)
-            if img is not None and not control.cancelled:
-                view = self.stage_view
-                after = view.after
-                after.clear()
-                after.texture = texture_from_pil(img)  # no full-resolution detail
-                after.source_size = view.before.source_size
-                self._restore_shown = True
-                self._restore_stale = False
-                self._stage_shown_look = None
-                view.comparing = True
-                view.queue_draw()
-            elif exc is not None and not isinstance(exc, CancelledError):
-                show_error(self, friendly_error(exc))
-            self._update_stage_overlays()
+            self._restore_worker = False
+            if self._restore_control is control:
+                self._restore_control = None
+                self.stage_spinner.set_spinning(False)
+                if img is not None and not control.cancelled:
+                    view = self.stage_view
+                    after = view.after
+                    after.clear()
+                    after.texture = texture_from_pil(img)  # no full-resolution detail
+                    after.source_size = view.before.source_size
+                    self._restore_shown = True
+                    self._restore_key = key
+                    self._stage_shown_look = None
+                    view.comparing = True
+                    view.queue_draw()
+                else:
+                    if exc is not None and not isinstance(exc, CancelledError):
+                        show_error(self, friendly_error(exc))
+                    self._render_stage_look()  # look changes made meanwhile
+                self._update_stage_overlays()
+            # (Otherwise dropped meanwhile: another photo, the mode or a batch.)
+            waiting, self._after_restore_worker = self._after_restore_worker, []
+            for callback in waiting:
+                callback()
 
         run_in_thread(work, on_done=finish, on_error=lambda e: finish(None, e), name="restore")
 
-    def _cancel_restore_preview(self) -> None:
-        """Stop a running restoration preview (a batch needs the models)."""
+    def _drop_restore_preview(self) -> None:
+        """Stop and forget the restoration preview: the live look takes the
+        after side again. (A cancelled worker may run on until its next check;
+        ``_restore_worker`` keeps new work off the engine until then.)"""
+        if not self._restore_active:
+            return
         if self._restore_control is not None:
             self._restore_control.cancel()
             self._restore_control = None
             self.stage_spinner.set_spinning(False)
-            self._update_stage_overlays()
-
-    def _drop_restore_preview(self) -> None:
-        """Forget the restoration preview: the live look takes the after side again."""
-        self._cancel_restore_preview()
         if self._restore_shown:
-            self._restore_shown = self._restore_stale = False
+            self._restore_shown = False
+            self._restore_key = None
             self.stage_view.after.clear()
             self._stage_shown_look = None
             self.stage_view.queue_draw()
-            self._render_stage_look()
+        self._render_stage_look()
+        self._update_stage_overlays()
 
     # --- stage overlays ----------------------------------------------------
     def _update_stage_overlays(self) -> None:
@@ -1261,15 +1296,36 @@ class MainWindow(Adw.ApplicationWindow):
         restore_btn.set_sensitive(not busy and not self.running)
         if busy:
             restore_btn.set_label("Restoring…")
-        elif self._restore_shown and self._restore_stale:
+        elif self._restore_shown and self._restore_key != self._restoration_key():
             restore_btn.set_label("Update Preview")
         else:
             restore_btn.set_label("Preview Restoration")
+        if self._compare_pending and view.image_size[0]:  # double-clicked, loaded
+            if view.can_compare:
+                self._compare_pending = False
+                view.comparing = True
+            if not self._stage_busy and self._restore_control is None:
+                self._compare_pending = False  # nothing to compare this photo with
         # Comparing, the divider labels both sides in place of the badge.
         self.stage_badge.set_visible(not view.showing_split)
         for widget in (self.stage_info, self.stage_tools):
             widget.set_visible(True)
         self._update_zoom_chip()
+
+    def _on_key(
+        self, _ctrl: Gtk.EventControllerKey, keyval: int, _code: int, state: Gdk.ModifierType
+    ) -> bool:
+        """C (any case, from anywhere in the workspace) toggles Compare."""
+        modifiers = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
+        if (
+            state & (modifiers | Gdk.ModifierType.SUPER_MASK)
+            or Gdk.keyval_to_lower(keyval) != Gdk.KEY_c
+            or not self.compare_btn.is_visible()
+            or self.get_visible_dialog() is not None
+        ):
+            return False
+        self.stage_view.comparing = not self.stage_view.comparing
+        return True
 
     def _update_zoom_chip(self) -> None:
         view = self.stage_view
@@ -1415,7 +1471,9 @@ class MainWindow(Adw.ApplicationWindow):
                 show_error(self, row.item.error)
             return
         self.listbox.select_row(row)
-        self.stage_view.comparing = True
+        # The photo may still be loading: compare once both sides are there.
+        self._compare_pending = True
+        self._update_stage_overlays()
         self.stage_view.grab_focus()
 
     # --- processing --------------------------------------------------------
@@ -1470,6 +1528,12 @@ class MainWindow(Adw.ApplicationWindow):
         are skipped; the saved settings stay as they are).
         """
         if self.running:
+            return
+        if self._restore_worker:
+            # A cancelled restoration preview still holds the engine: start
+            # once it has let go, never alongside it.
+            self._drop_restore_preview()
+            self._after_restore_worker.append(lambda: self.start(rows, without))
             return
         if self.app.device_report is None:
             self.toasts.add_toast(Adw.Toast(title="Still detecting the processing device…"))
@@ -1759,7 +1823,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.panel_stack.set_sensitive(not running)
         self.mode_box.set_sensitive(not running)
         if running:
-            self._cancel_restore_preview()  # the batch needs the models and device
+            self._drop_restore_preview()  # the batch needs the models; results follow
         self._update_stage_overlays()
         self.progress_revealer.set_reveal_child(self.processor is not None)
 

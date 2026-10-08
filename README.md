@@ -4,7 +4,8 @@
 
 Pixelift is a native Ubuntu desktop app (GTK 4 + libadwaita) and command-line
 tool that upscales images 2× or 4× with [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)
-super-resolution.
+super-resolution — and restores old photographs: dust, scratches, fading,
+colour casts, faces, and optional colorization of black-and-white photos.
 
 > 🔒 **Your images stay on your computer.** Processing is 100 % local. There
 > is no account, no telemetry and no analytics. The internet is only used —
@@ -23,6 +24,11 @@ super-resolution.
 - Lighting profiles (Natural Daylight, Golden Hour, Cinematic, Low Light
   Recovery and more) or your own custom adjustments, applied before upscaling
   with a live preview
+- **AI Photo Restoration** for old scans: dust and scratch removal, noise
+  reduction, faded-colour and yellowing correction, identity-preserving face
+  restoration (GFPGAN), optional colorization of black-and-white photos
+  (DeOldify), Modern Finish, and optional upscaling — see
+  [Photo restoration](#photo-restoration)
 - Before/after comparison: slider, toggle, zoom, pan, fit, 100 %
 - Keeps EXIF orientation (no accidental rotation), EXIF metadata, ICC colour
   profiles, DPI, transparency and grayscale
@@ -104,14 +110,29 @@ You can manage models later in **Preferences → Models**.
 | `realesrgan-x4plus-anime` | Real-ESRGAN Anime | 4× | 18 MB | Anime, illustrations |
 | `realesr-animevideov3` | Real-ESRGAN Anime Video v3 (fast) | 4× | 2.5 MB | Anime, fast |
 
+Photo restoration can use three more models. They are only needed for the
+stages that use them, and Pixelift asks (showing size and license) before
+downloading anything:
+
+| Model id | Name | Version | Size | License | Used for |
+|---|---|---|---|---|---|
+| `gfpgan-v1.4` | GFPGAN | v1.4 | 349 MB | Apache-2.0 | Face restoration |
+| `retinaface-resnet50` | RetinaFace face detector | facexlib v0.1.0 | 109 MB | MIT | Finding faces |
+| `deoldify-artistic` | DeOldify | Artistic | 255 MB | MIT | Colorizing B&W photos |
+
 In the app you pick a *model family* (e.g. "Real-ESRGAN") and a scale; Pixelift
 uses the matching native-scale weights if installed, otherwise a larger-scale
 model followed by high-quality downsampling.
 
-**Licenses.** All model weights are published by the Real-ESRGAN project under
+**Licenses.** The upscaling weights are published by the Real-ESRGAN project under
 the [BSD 3-Clause license](https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE)
-and are downloaded from its official GitHub releases. Every file is verified
-against a SHA-256 checksum recorded in `pixelift/models/realesrgan.py`.
+and are downloaded from its official GitHub releases. The restoration models
+come from their projects' official locations:
+[GFPGAN](https://github.com/TencentARC/GFPGAN) (Apache-2.0),
+[facexlib](https://github.com/xinntao/facexlib) (MIT) and
+[DeOldify](https://github.com/jantic/DeOldify) (MIT). Every file is verified
+against a SHA-256 checksum recorded in `pixelift/models/realesrgan.py` and
+`pixelift/models/restoration.py`.
 
 **Command line / offline installation:**
 
@@ -179,6 +200,76 @@ template to place it yourself. Changing the lighting puts finished images back
 in the queue; their earlier results stay on disk. A grayscale image stays
 grayscale unless the profile warms, cools or tints it.
 
+### Photo restoration
+
+Click **Restore Photos** in the header bar, add old scans and press
+**Restore Photos**. Everything runs on your computer: photos are never
+uploaded, and no account, cloud service or internet connection is needed (AI
+models are downloaded once, only when you agree).
+
+**What to do** (*Restore* in the bottom bar): **Restore**, **Restore +
+Colorize**, **Restore + Upscale** or **Full Restoration** (colorize and
+upscale). **Level:**
+
+| Level | Stages |
+|---|---|
+| Light | Colour and contrast correction, light denoise, light sharpening — for photos in good condition |
+| Standard (default) | Dust, scratches, noise, colour correction, face restoration, detail enhancement |
+| Heavy | Stronger repair of all of the above plus AI detail reconstruction (Real-ESRGAN) |
+| Custom | Your own value for every stage |
+
+**Options…** opens everything else: face restoration (Off / **Natural** /
+Strong), *Restoration fidelity* (Original ↔ AI enhanced), the Dust, Scratches,
+Noise, Fading and Sharpness sliders, automatic colour correction, manual
+colour correction (temperature, tint, exposure, contrast, saturation — the
+same engine as the lighting profiles, which also apply), colorization style
+and strength, *Preserve original tones*, Modern Finish (Off, **Natural**,
+Clean, Vivid, Professional), the upscale factor, and the status of the AI
+models with a **Manage Models** button.
+
+**Black-and-white photos** (including sepia-toned and yellowed prints) are
+detected automatically. Pixelift then asks whether to *Restore in B&W* or
+*Restore & Colorize* — it never colorizes without your consent, and colour
+photos are never colorized. Colorization aims for natural, historical colour;
+*Color strength* goes from 0 % (the grey photo) through 50 % (natural) to
+100 % (full colour), and *Preserve original tones* keeps every brightness
+value of the original, adding colour only.
+
+**Identity comes first.** Face restoration only replaces the facial area
+(hair, ears and background keep their original pixels), keeps the original
+face's shape, skin tone and lighting, and takes only fine detail from the AI
+in *Natural* mode. Faces that are tiny, uncertain or too damaged to restore
+reliably — where the AI would invent a different-looking person — are left
+close to the original. Lower *Restoration fidelity* keeps more original pixels.
+
+**Processing order.** Pixelift does not blindly follow "cleanup → colour →
+faces → upscale": black-and-white photos are first made neutral grey; dust
+and scratches are removed *before* denoising (which would smear them); noise
+is reduced *before* faded tones are stretched (which would amplify it);
+colorization runs on the cleaned photo; colour correction, Modern Finish and
+the lighting profile follow; then Real-ESRGAN upscales; faces are restored
+*at the output resolution* (so GFPGAN's detail is not shrunk and re-upscaled);
+sharpening comes last. Dust, scratches, noise, fading, colour and sharpening
+use conventional image processing (morphology, guided filtering, levels) —
+AI is used only where it is clearly better: faces, colorization and
+upscaling.
+
+**Before / after.** Click the compare button of a restored photo to compare
+*Original Scan* and *Restored* with the slider, zoom, pan, 100 % and fit.
+Before restoring, the preview's **Preview Restoration** button shows the
+current settings on a reduced-size copy.
+
+**Output.** Originals are never modified — Pixelift refuses to write to the
+source file whatever the folder or file-name settings. Results go to a
+`restored` folder next to the originals: `grandma_1962.jpg` →
+`grandma_1962_restored.jpg`, `grandma_1962_restored_colorized.jpg`,
+`grandma_1962_restored_4x.jpg`. Light/Heavy add their name
+(`…_restored-heavy.jpg`) and other non-default settings a short code
+(`…_restored-1a2b3c.jpg`), so different restorations never overwrite each
+other. EXIF metadata (with orientation normalised), ICC colour profiles,
+original dates and DPI are kept, as with upscaling. Batches use the normal
+queue; AI models are loaded once per batch.
+
 ### Command line
 
 ```bash
@@ -190,6 +281,11 @@ pixelift ./photos \
     --output ./upscaled
 
 pixelift portrait.jpg --lighting golden-hour --lighting-intensity 60
+
+# Photo restoration
+pixelift --restore old_photos/
+pixelift --restore --colorize --upscale --scale 4 grandma_1962.jpg
+pixelift --restore --restore-level heavy --face strong --fidelity 30 damaged.tif
 ```
 
 | Option | Meaning |
@@ -208,6 +304,14 @@ pixelift portrait.jpg --lighting golden-hour --lighting-intensity 60
 | `--no-metadata` | Don't copy EXIF/ICC |
 | `--threads N` | CPU threads |
 | `--list-devices`, `--list-models` | Show hardware / models |
+| `-r`, `--restore` | Restore photos instead of only upscaling (output in `<input dir>/restored`) |
+| `--restore-level light\|standard\|heavy` | Restoration level (default: the app's setting) |
+| `--colorize` | Colorize black-and-white photos (never colour ones) |
+| `--colorize-strength 0-100` | 0 = grey … 100 = full colour |
+| `--upscale` | Also upscale restored photos by `--scale` |
+| `--face off\|natural\|strong` | Face restoration |
+| `--fidelity 0-100` | 0 keeps the original pixels, 100 trusts the AI |
+| `--modern off\|natural\|clean\|vivid\|professional` | Modern Finish |
 
 `image-upscaler` is installed as an alias of `pixelift`. Running `pixelift`
 with no arguments (or with `--gui [files…]`) opens the desktop app.
@@ -284,6 +388,15 @@ pixelift/
 │   ├── tiling.py        tile layout + seam feathering (pure numpy)
 │   ├── image_processor.py  load → lighting → upscale → restore alpha/mode → save (one image)
 │   ├── lighting.py      lighting profiles and adjustments (pure numpy)
+│   ├── restoration/     AI photo restoration (no GTK)
+│   │   ├── settings.py     levels, presets, stages, file-name tag (no PyTorch)
+│   │   ├── analysis.py     B&W detection, noise and levels measurement (no PyTorch)
+│   │   ├── pipeline.py     Restorer: stage order, progress, model checks
+│   │   ├── cleanup.py      dust, scratches, denoise, sharpen, clarity (morphology, guided filter)
+│   │   ├── tones.py        fade recovery, colour casts, Modern Finish (via lighting engine)
+│   │   ├── faces.py        RetinaFace detection, alignment, GFPGAN, identity safeguards
+│   │   ├── colorize.py     DeOldify colorization, natural chroma, tone preservation
+│   │   └── filters.py      tiled processing and filter primitives
 │   ├── batch_processor.py  bounded worker pool, pause/resume/cancel, events
 │   ├── device_manager.py   CUDA / ROCm / XPU / CPU detection
 │   ├── model_manager.py    download, checksum, install, remove
@@ -302,6 +415,14 @@ engine could be reused from another front-end (e.g. Rust) or replaced.
 **Adding a lighting profile:** call `register_profile(LightingProfile(...))` in
 `pixelift/core/lighting.py`; the app, settings and CLI list every registered
 profile.
+
+**Adding a restoration stage:** add a function to `core/restoration/` that
+takes and returns an RGB `uint8` array, call it from `Restorer.restore` at the
+right place in the order, give it a progress weight in `_Plan`, and expose its
+setting in `restoration/settings.py`. Models it needs are `ModelSpec`s with a
+`kind` (see `pixelift/models/restoration.py`) and are loaded with
+`TorchUpscaler.run_model`, which shares the device handling, model cache and
+CPU fallback with upscaling.
 
 **Adding a model:** implement the network (or reuse `RRDBNet` /
 `SRVGGNetCompact`), create `ModelSpec`s with URL, SHA-256 and license in a new
@@ -328,9 +449,31 @@ version (build on Ubuntu 24.04 for 24.04 targets).
   image buffer; Pixelift refuses jobs that would not fit instead of crashing.
 - When zoomed into a huge result, the preview decodes the visible region from
   disk on demand, which can take a moment for very large PNGs.
+- Photo restoration: dust and scratch removal tell damage from detail by
+  shape, contrast, density and surroundings, but tiny isolated bright details
+  (catchlights in very small eyes, the stripes of a lapel pin) can look exactly
+  like damage. For photos in good condition use the *Light* level (no dust or
+  scratch removal) or lower those sliders. Dense regular patterns (fabric,
+  print screens) are recognised and kept. Long, faint scratches across busy
+  texture may be only partly removed.
+- Colorization is a plausible guess, not a record of the real colours; it can
+  be wrong for clothing, objects and backgrounds. The DeOldify Artistic model
+  is the one with an official download; its colours are toned down for a
+  natural look.
+- Face restoration needs faces at least ~10 px between the eyes; profile views
+  and heavily obscured faces may not be detected. Restoring dozens of faces on
+  a CPU takes a few seconds per face.
+- The restoration preview works on a reduced-size copy (no upscaling), so it
+  shows the look, not the final detail.
 
 ## License
 
 Pixelift is MIT-licensed (see `LICENSE`). The Real-ESRGAN network architectures
 are re-implemented from BSD-3-Clause code © 2021 Xintao Wang; model weights are
 downloaded separately under the same BSD-3-Clause license.
+
+The restoration networks are re-implemented from: GFPGAN (Apache-2.0,
+© 2021 THL A29 Limited, a Tencent company; its StyleGAN2 decoder derives from
+stylegan2-pytorch, MIT), facexlib / Pytorch_Retinaface (MIT) and DeOldify (MIT,
+© 2018 Jason Antic). Their weights are downloaded separately under the same
+licenses. The test photographs in `tests/data` are in the public domain.

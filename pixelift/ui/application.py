@@ -181,7 +181,8 @@ class UpscalerApplication(Adw.Application):
             version=__version__,
             developer_name="Pixelift contributors",
             license_type=Gtk.License.MIT_X11,
-            comments="AI image upscaling that runs entirely on your computer.\n"
+            comments="AI image upscaling and photo restoration that run entirely on your "
+            "computer.\n"
             "Your images stay on your computer.",
             website="https://github.com/xinntao/Real-ESRGAN",
         )
@@ -191,7 +192,27 @@ class UpscalerApplication(Adw.Application):
             Gtk.License.BSD_3,
             None,
         )
-        about.add_credit_section("AI models", ["Real-ESRGAN by Xintao Wang et al."])
+        about.add_legal_section(
+            "GFPGAN",
+            "Copyright © 2021 THL A29 Limited, a Tencent company",
+            Gtk.License.APACHE_2_0,
+            None,
+        )
+        about.add_legal_section(
+            "facexlib (RetinaFace)", "Copyright © 2020 Xintao Wang", Gtk.License.MIT_X11, None
+        )
+        about.add_legal_section(
+            "DeOldify", "Copyright © 2018 Jason Antic", Gtk.License.MIT_X11, None
+        )
+        about.add_credit_section(
+            "AI models",
+            [
+                "Real-ESRGAN by Xintao Wang et al.",
+                "GFPGAN by Xintao Wang et al. (Tencent ARC)",
+                "RetinaFace by Jiankang Deng et al.",
+                "DeOldify by Jason Antic",
+            ],
+        )
         about.present(self.props.active_window)
 
     def open_log_folder(self) -> None:

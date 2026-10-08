@@ -1,4 +1,8 @@
-"""Main window: drop zone, image queue, output and lighting options, batch controls."""
+"""Main window: drop zone, image queue, output and lighting options, batch controls.
+
+Two modes share the queue, the worker and the output options: *Upscale* and
+*Restore Photos* (AI photo restoration, which can also upscale).
+"""
 
 from __future__ import annotations
 
@@ -18,12 +22,20 @@ from pixelift.core.batch_processor import (
     QueueItem,
 )
 from pixelift.core.errors import ModelNotInstalledError, UpscalerError
+from pixelift.core.image_processor import restoration_tag
+from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
 from pixelift.ui.async_utils import idle
 from pixelift.ui.image_queue import QueueRow, ThumbnailLoader
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
+from pixelift.ui.widgets.restoration import (
+    PRIVACY_TEXT,
+    BlackAndWhiteBanner,
+    RestorationDialog,
+    RestorationPanel,
+)
 from pixelift.utils.image_utils import SUPPORTED_EXTENSIONS, collect_images
 
 if TYPE_CHECKING:
@@ -48,6 +60,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._upscaler_key: tuple[object, ...] | None = None
         self._inhibit_cookie = 0
         self._syncing = False
+        self._bw_answered = False  # asked "Restore in B&W or colorize?" this session
 
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(self._build_header())
@@ -68,13 +81,14 @@ class MainWindow(Adw.ApplicationWindow):
 
         narrow = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 640sp"))
         narrow.add_setter(self.options_box, "orientation", Gtk.Orientation.VERTICAL)
+        narrow.add_setter(self.restore_panel, "orientation", Gtk.Orientation.VERTICAL)
         narrow.add_setter(self.lighting, "orientation", Gtk.Orientation.VERTICAL)
         narrow.add_setter(self.buttons_box, "orientation", Gtk.Orientation.VERTICAL)
         self.add_breakpoint(narrow)
 
         self.connect("close-request", self._on_close_request)
         app.on_settings_changed(self._sync_from_settings)
-        app.on_lighting_changed(self._on_lighting_changed)
+        app.on_lighting_changed(self._reset_stale)
         app.downloads.subscribe(lambda *_: self._refresh_model_list())
         app.when_devices_ready(self._on_devices)
         self._sync_from_settings()
@@ -94,6 +108,20 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self.clear_btn.connect("clicked", lambda _b: self.clear_finished())
         header.pack_start(self.clear_btn)
+
+        self.mode_box = Gtk.Box(css_classes=["linked"])
+        self.mode_buttons: dict[str, Gtk.ToggleButton] = {}
+        first: Gtk.ToggleButton | None = None
+        for mode, label, tip in (
+            ("upscale", "Upscale", "AI upscaling"),
+            ("restore", "Restore Photos", "AI photo restoration for old photographs"),
+        ):
+            button = Gtk.ToggleButton(label=label, tooltip_text=tip, group=first)
+            first = first or button
+            button.connect("toggled", self._on_mode_toggled, mode)
+            self.mode_box.append(button)
+            self.mode_buttons[mode] = button
+        header.pack_start(self.mode_box)
 
         menu = Gio.Menu()
         section = Gio.Menu()
@@ -131,11 +159,17 @@ class MainWindow(Adw.ApplicationWindow):
         select.add_css_class("suggested-action")
         select.connect("clicked", lambda _b: self.open_file_dialog())
         box.append(select)
-        privacy = Gtk.Label(label="🔒 Your images stay on your computer.")
-        privacy.add_css_class("dim-label")
-        privacy.add_css_class("privacy-note")
-        box.append(privacy)
+        self.privacy_label = Gtk.Label(
+            label="🔒 Your images stay on your computer.",
+            wrap=True,
+            justify=Gtk.Justification.CENTER,
+        )
+        self.privacy_label.set_max_width_chars(60)
+        self.privacy_label.add_css_class("dim-label")
+        self.privacy_label.add_css_class("privacy-note")
+        box.append(self.privacy_label)
         page.set_child(box)
+        self.empty_page = page
         return page
 
     def _build_queue_page(self) -> Gtk.Widget:
@@ -154,6 +188,8 @@ class MainWindow(Adw.ApplicationWindow):
             margin_end=12,
         )
         content.append(header)
+        self.bw_banner = BlackAndWhiteBanner(self._on_bw_choice)
+        content.append(self.bw_banner)
         content.append(self.listbox)
         clamp = Adw.Clamp(maximum_size=960, child=content)
         return Gtk.ScrolledWindow(child=clamp, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
@@ -195,7 +231,10 @@ class MainWindow(Adw.ApplicationWindow):
         output_row.append(self.output_reset)
         self.output_btn.set_hexpand(True)
 
-        self.options_box.append(self._labeled("Scale", self.scale_dd))
+        self.restore_panel = RestorationPanel(self.app, self.show_restoration_options)
+        panel.append(self.restore_panel)
+        self.scale_box = self._labeled("Scale", self.scale_dd)
+        self.options_box.append(self.scale_box)
         self.options_box.append(self._labeled("Model", self.model_dd))
         self.options_box.append(self._labeled("Format", self.format_dd))
         self.options_box.append(self._labeled("Output", output_row))
@@ -260,35 +299,84 @@ class MainWindow(Adw.ApplicationWindow):
         finally:
             self._syncing = False
 
+    @property
+    def restoring(self) -> bool:
+        return self.app.settings.mode == "restore"
+
     def _sync_from_settings(self) -> None:
         settings = self.app.settings
         self._refresh_model_list()
+        restoring = self.restoring
+        scale = settings.restore_scale if restoring else settings.scale
         self._syncing = True
         try:
-            self.scale_dd.set_selected(
-                SCALES.index(settings.scale) if settings.scale in SCALES else 1
-            )
+            self.mode_buttons[settings.mode].set_active(True)
+            self.scale_dd.set_selected(SCALES.index(scale) if scale in SCALES else 1)
             fmt_ids = [f for f, _ in FORMATS]
             self.format_dd.set_selected(fmt_ids.index(settings.output_format))
             if settings.output_dir:
                 self.output_label.set_label(Path(settings.output_dir).name or settings.output_dir)
                 self.output_btn.set_tooltip_text(settings.output_dir)
             else:
-                self.output_label.set_label("Next to originals (upscaled/)")
-                self.output_btn.set_tooltip_text("<original folder>/upscaled/")
+                folder = "restored" if restoring else "upscaled"
+                self.output_label.set_label(f"Next to originals ({folder}/)")
+                self.output_btn.set_tooltip_text(f"<original folder>/{folder}/")
             self.output_reset.set_visible(bool(settings.output_dir))
         finally:
             self._syncing = False
+        self._sync_mode()
+        output_scale = settings.processing_options().output_scale
         for row in self.rows:
-            row.set_scale(settings.scale)
+            row.set_scale(output_scale, show_monochrome=restoring)
         if self.app.device_report:
             self._on_devices(self.app.device_report)
+        self._update_state()
 
-    def _on_lighting_changed(self) -> None:
-        """Results made with other lighting are out of date: queue them again.
+    def _sync_mode(self) -> None:
+        """Show the controls of the current mode (Upscale or Restore Photos)."""
+        restoring = self.restoring
+        settings = self.app.settings
+        _colorize, upscale = rs.preset_flags(settings.restore_preset)
+        self.restore_panel.set_visible(restoring)
+        self.scale_box.set_visible(not restoring or upscale)
+        if restoring:
+            self.empty_page.set_title("Drop old photographs here")
+            self.empty_page.set_description(
+                "Restore faded, scratched and damaged photos — black and white or colour."
+            )
+            self.privacy_label.set_label(PRIVACY_TEXT)
+        else:
+            self.empty_page.set_title("Drop images here")
+            self.empty_page.set_description(
+                "PNG, JPEG, WebP, TIFF or BMP — single images or whole folders."
+            )
+            self.privacy_label.set_label("🔒 Your images stay on your computer.")
+        self._update_bw_banner()
 
-        Their files stay on disk (the lighting is part of the file name), so
-        switching back to that lighting just finds and skips them.
+    def _on_mode_toggled(self, button: Gtk.ToggleButton, mode: str) -> None:
+        if self._syncing or not button.get_active() or self.app.settings.mode == mode:
+            return
+        self.app.settings.mode = mode
+        self.app.settings_changed()
+
+    def show_restoration_options(self) -> None:
+        RestorationDialog(self.app).present(self)
+
+    def _expected_restoration(self, row: QueueRow) -> str | None:
+        """The restoration tag a current result for ``row`` would have (None: upscaling)."""
+        options = self.app.settings.processing_options()
+        restoration = options.restoration
+        if restoration is None:
+            return None
+        colorize = row.monochrome and restoration.colorize and restoration.colorize_strength > 0
+        return restoration_tag(options, colorize)
+
+    def _reset_stale(self) -> None:
+        """Results made with other lighting or restoration settings (or in the
+        other mode) are out of date: queue them again.
+
+        Their files stay on disk (the settings are part of the file name), so
+        switching back just finds and skips them.
         """
         if self.running:
             return
@@ -298,7 +386,10 @@ class MainWindow(Adw.ApplicationWindow):
             for r in self.rows
             if r.item.status in (ItemStatus.DONE, ItemStatus.SKIPPED)
             and r.item.result is not None
-            and r.item.result.lighting != tag
+            and (
+                r.item.result.lighting != tag
+                or r.item.result.restoration != self._expected_restoration(r)
+            )
         ]
         for row in stale:
             row.item.reset()
@@ -310,7 +401,10 @@ class MainWindow(Adw.ApplicationWindow):
         if self._syncing:
             return
         settings = self.app.settings
-        settings.scale = SCALES[self.scale_dd.get_selected()]
+        if self.restoring:
+            settings.restore_scale = SCALES[self.scale_dd.get_selected()]
+        else:
+            settings.scale = SCALES[self.scale_dd.get_selected()]
         families = self._families()
         if self.model_dd.get_selected() < len(families):
             settings.model = families[self.model_dd.get_selected()][0]
@@ -393,12 +487,15 @@ class MainWindow(Adw.ApplicationWindow):
         row = QueueRow(
             item, self.remove_row, self.retry_row, self.open_preview, self.show_row_error
         )
-        row.set_scale(self.app.settings.scale)
+        row.set_scale(
+            self.app.settings.processing_options().output_scale, show_monochrome=self.restoring
+        )
         self.rows.append(row)
         self.listbox.append(row)
 
-        def ready(info: object, thumb: object, r: QueueRow = row) -> None:
-            r.set_info(info, thumb)
+        def ready(info: object, thumb: object, mono: bool, r: QueueRow = row) -> None:
+            r.set_info(info, thumb, mono)
+            self._update_bw_banner()
             self._update_state()
 
         def failed(err: UpscalerError, r: QueueRow = row) -> None:
@@ -412,6 +509,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
         self.rows.remove(row)
         self.listbox.remove(row)
+        self._update_bw_banner()
         self._update_state()
 
     def clear_finished(self) -> None:
@@ -455,40 +553,73 @@ class MainWindow(Adw.ApplicationWindow):
             self._upscaler_key = key
         return self._upscaler
 
+    def preview_restorer(self) -> tuple:
+        """(restorer, restoration settings, options) for a preview, models checked.
+
+        Shares the batch's engine, so models loaded for a preview are reused.
+        """
+        from pixelift.core.restoration.pipeline import Restorer
+
+        options = self.app.settings.processing_options()
+        restoration = options.restoration or self.app.settings.restoration()
+        options.validate()
+        restorer = Restorer(self._get_upscaler())  # restore() reports missing models
+        if restoration.ai_scale():
+            self.app.model_manager.resolve(options.model, restoration.ai_scale())
+        return restorer, restoration, options
+
     def _on_device_fallback(self, device: dm.DeviceInfo, reason: str) -> None:
         self.window_title.set_subtitle(f"Processing device: {device.label()}")
         self.toasts.add_toast(Adw.Toast(title=f"{reason} — continuing on the CPU", timeout=6))
         self._upscaler_key = None  # rebuild with the preferred device next time
 
-    def start(self, rows: list[QueueRow] | None = None) -> None:
+    def start(
+        self, rows: list[QueueRow] | None = None, without: frozenset[str] = frozenset()
+    ) -> None:
+        """Process ``rows`` (default: the whole queue).
+
+        ``without``: model ids to do without for this batch only (their stages
+        are skipped; the saved settings stay as they are).
+        """
         if self.running:
             return
         if self.app.device_report is None:
             self.toasts.add_toast(Adw.Toast(title="Still detecting the processing device…"))
-            self.app.when_devices_ready(lambda _r: self.start(rows))
+            self.app.when_devices_ready(lambda _r: self.start(rows, without))
             return
         settings = self.app.settings
         options = settings.processing_options()
-        try:
-            options.validate()
-            self.app.model_manager.resolve(options.model, options.scale)
-        except ModelNotInstalledError as err:
-            self._offer_model_download(err)
-            return
-        except (ValueError, UpscalerError) as err:
-            show_error(self, err if isinstance(err, UpscalerError) else UpscalerError(str(err)))
-            return
-
+        if options.restoration is not None and without:
+            options.restoration = _without_models(options.restoration, without)
         candidates = rows if rows is not None else self.rows
         todo = [
             r
             for r in candidates
             if r.ready and r.item.status not in (ItemStatus.DONE, ItemStatus.SKIPPED)
         ]
+        try:
+            options.validate()
+            restoration = options.restoration
+            if restoration is None:
+                self.app.model_manager.resolve(options.model, options.scale)
+            elif restoration.ai_scale():
+                self.app.model_manager.resolve(options.model, restoration.ai_scale())
+        except ModelNotInstalledError as err:
+            self._offer_model_download(err)
+            return
+        except (ValueError, UpscalerError) as err:
+            show_error(self, err if isinstance(err, UpscalerError) else UpscalerError(str(err)))
+            return
+        if options.restoration is not None and not self._restoration_models_ready(
+            options.restoration, any(r.monochrome for r in todo), rows, without
+        ):
+            return
+
         if not todo:
+            verb = "restore" if options.restoration is not None else "upscale"
             self.toasts.add_toast(
                 Adw.Toast(
-                    title="Nothing to upscale — add some images first"
+                    title=f"Nothing to {verb} — add some images first"
                     if not self.rows
                     else "All images are already done"
                 )
@@ -513,10 +644,88 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self.window_title.set_subtitle(f"Processing device: {upscaler.device.label()}")
         self._inhibit_cookie = self.app.inhibit(
-            self, Gtk.ApplicationInhibitFlags.SUSPEND, "Upscaling images"
+            self,
+            Gtk.ApplicationInhibitFlags.SUSPEND,
+            "Restoring photos" if options.restoration is not None else "Upscaling images",
         )
         self.processor.start([r.item for r in todo], others=[r.item for r in self.rows])
         self._update_state()
+
+    def _restoration_models_ready(
+        self,
+        restoration: rs.RestorationSettings,
+        any_mono: bool,
+        rows: list[QueueRow] | None,
+        without: frozenset[str],
+    ) -> bool:
+        """Ask before downloading missing restoration models (never silently)."""
+        from pixelift.core.restoration.pipeline import required_models
+
+        manager = self.app.model_manager
+        missing = [
+            manager.spec(model_id)
+            for model_id in required_models(restoration, monochrome=any_mono)
+            if not manager.is_installed(model_id)
+        ]
+        if not missing:
+            return True
+        total = sum(s.size_bytes for s in missing)
+        lines = "\n".join(
+            f"• {s.name} {s.version} — {s.size_mb:.0f} MB, {s.license}" for s in missing
+        )
+        dialog = Adw.AlertDialog(
+            heading="AI models needed",
+            body=f"This restoration uses AI models that are not installed yet:\n\n{lines}\n\n"
+            f"Download them now ({total / 1e6:.0f} MB in total, once)? They come from the "
+            "projects' official releases and are verified. Your photos are still processed "
+            "only on this computer.",
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("without", "Continue Without")
+        dialog.add_response("download", "Download")
+        dialog.set_response_appearance("download", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("download")
+
+        def on_response(_d: Adw.AlertDialog, response: str) -> None:
+            if response == "download":
+                for spec in missing:
+                    self.app.downloads.start(spec.id)
+                self.app.show_preferences(page="models")
+                self.toasts.add_toast(
+                    Adw.Toast(title="Downloading AI models — start again when they are ready")
+                )
+            elif response == "without":
+                self.start(rows, without | {s.id for s in missing})
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+        return False
+
+    # --- black and white photos -----------------------------------------
+    def _update_bw_banner(self) -> None:
+        count = sum(
+            1
+            for r in self.rows
+            if r.ready
+            and r.monochrome
+            and r.item.status not in (ItemStatus.DONE, ItemStatus.SKIPPED)
+        )
+        if self.restoring and count and not self._bw_answered:
+            self.bw_banner.show_for(count)
+        else:
+            self.bw_banner.set_reveal_child(False)
+
+    def _on_bw_choice(self, colorize: bool) -> None:
+        """Colorize only with consent: the user picked on the banner."""
+        settings = self.app.settings
+        self._bw_answered = True
+        _current, upscale = rs.preset_flags(settings.restore_preset)
+        if colorize:
+            settings.restore_preset = rs.PRESET_FULL if upscale else rs.PRESET_COLORIZE
+        else:
+            settings.restore_preset = rs.PRESET_UPSCALE if upscale else rs.PRESET_RESTORE
+        self.app.settings_changed()
+        self._update_bw_banner()
 
     def _offer_model_download(self, err: ModelNotInstalledError) -> None:
         dialog = Adw.AlertDialog(heading=err.title, body=err.reason)
@@ -580,7 +789,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.overall_label.set_label(f"Overall: {ev.completed} / {ev.total}")
         if ev.kind in (EventKind.ITEM_STARTED, EventKind.ITEM_PROGRESS) and ev.item:
             paused = " (paused)" if self.processor and self.processor.paused else ""
-            self.current_label.set_label(f"Current: {ev.item.path.name}{paused}")
+            stage = f" — {ev.item.stage}" if ev.item.stage and ev.item.stage != "Starting" else ""
+            self.current_label.set_label(f"Current: {ev.item.path.name}{stage}{paused}")
         elif ev.kind is EventKind.PAUSED:
             self.current_label.set_label(
                 "Paused — the current image will continue where it stopped"
@@ -596,7 +806,8 @@ class MainWindow(Adw.ApplicationWindow):
         summary = self.processor.summary if self.processor else None
         if summary is None:
             return
-        parts = [f"{summary.done} upscaled"]
+        restored = self.processor is not None and self.processor.options.restoration is not None
+        parts = [f"{summary.done} {'restored' if restored else 'upscaled'}"]
         if summary.skipped:
             parts.append(f"{summary.skipped} skipped")
         if summary.failed:
@@ -616,7 +827,9 @@ class MainWindow(Adw.ApplicationWindow):
             toast.connect("button-clicked", lambda _t: done_rows[-1].show_in_folder())
         self.toasts.add_toast(toast)
         if not self.is_active():
-            notification = Gio.Notification.new("Upscaling finished")
+            notification = Gio.Notification.new(
+                "Restoration finished" if restored else "Upscaling finished"
+            )
             notification.set_body(text.capitalize())
             self.app.send_notification("batch-finished", notification)
 
@@ -640,9 +853,8 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self.start_btn.set_visible(not running)
         self.start_btn.set_sensitive(pending > 0)
-        self.start_btn.set_label(
-            f"Start Upscaling ({pending})" if pending and count > 1 else "Start Upscaling"
-        )
+        action = "Restore Photos" if self.restoring else "Start Upscaling"
+        self.start_btn.set_label(f"{action} ({pending})" if pending and count > 1 else action)
         self.pause_btn.set_visible(running)
         self.pause_btn.set_label("Resume" if self.processor and self.processor.paused else "Pause")
         self.cancel_btn.set_visible(running)
@@ -650,12 +862,16 @@ class MainWindow(Adw.ApplicationWindow):
         self.retry_btn.set_visible(not running and failed > 0)
         self.clear_btn.set_sensitive(count > 0 and not running)
         self.options_box.set_sensitive(not running)
+        self.restore_panel.set_sensitive(not running)
+        self.mode_box.set_sensitive(not running)
         self.lighting.set_sensitive(not running)
         from pixelift.ui.preview import PreviewWindow
 
         for window in self.app.get_windows():
             if isinstance(window, PreviewWindow):
                 window.set_lighting_editable(not running)
+                if running:
+                    window.cancel_restoration()  # the batch needs the models and device
         self.progress_revealer.set_reveal_child(self.processor is not None)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
@@ -663,7 +879,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.thumbnails.shutdown()
             return False
         dialog = Adw.AlertDialog(
-            heading="Stop upscaling?",
+            heading="Stop restoring?" if self.restoring else "Stop upscaling?",
             body="Images are still being processed. Unfinished images will not be saved.",
         )
         dialog.add_response("keep", "Keep Working")
@@ -681,3 +897,19 @@ class MainWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
         dialog.present(self)
         return True
+
+
+def _without_models(
+    restoration: rs.RestorationSettings, ids: frozenset[str]
+) -> rs.RestorationSettings:
+    """``restoration`` with the stages that need the models ``ids`` turned off."""
+    import dataclasses
+
+    from pixelift.models.restoration import COLORIZE_MODELS, FACE_MODELS
+
+    if ids & set(FACE_MODELS) and restoration.stages().face != rs.FACE_OFF:
+        custom = dataclasses.replace(restoration.stages(), face=rs.FACE_OFF)
+        restoration = dataclasses.replace(restoration, level=rs.CUSTOM, custom=custom)
+    if ids & set(COLORIZE_MODELS):
+        restoration = dataclasses.replace(restoration, colorize=False)
+    return restoration

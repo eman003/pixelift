@@ -12,7 +12,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 
@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 TileProgress = Callable[[int, int], None]  # (tiles_done, tiles_total)
+T = TypeVar("T")
 
 CPU_TILE_CAP = 512
 DEFAULT_OVERLAP = 32
@@ -155,9 +156,14 @@ class TorchUpscaler(Upscaler):
                 raise ModelNotInstalledError(f"{spec.name} is not installed.")
             log.info("Loading model %s on %s", spec.id, self.device.id)
             try:
-                checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+                with torch.serialization.safe_globals(list(spec.safe_globals)):
+                    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+                state = extract_state_dict(checkpoint, spec.state_key)
+                if spec.convert is not None:
+                    state = spec.convert(state)
                 net = spec.build()
-                net.load_state_dict(extract_state_dict(checkpoint, spec.state_key), strict=True)
+                net.load_state_dict(state, strict=True)
+                del state
             except Exception as exc:
                 log.exception("Failed to load %s", path)
                 raise ModelNotInstalledError(
@@ -195,6 +201,56 @@ class TorchUpscaler(Upscaler):
             self.on_device_change(self.device, reason)
 
     # --- inference ---------------------------------------------------------
+    def run_model(
+        self,
+        spec: ModelSpec,
+        fn: Callable[[nn.Module, dm.DeviceInfo], T],
+        control: JobControl | None = None,
+        release: bool = True,
+    ) -> T:
+        """Run ``fn(net, device)`` with ``spec`` loaded, for non-tiled networks.
+
+        Shares the upscaling engine's model cache and its error handling: on a
+        GPU out-of-memory or driver error the work is retried on the CPU (if
+        CPU fallback is enabled), and every model then moves to the CPU too.
+        ``release=False`` keeps the GPU memory cache for a run of calls (the
+        caller then calls :meth:`release_memory` once at the end).
+        """
+        while True:
+            if control is not None:
+                control.check()
+            with self._lock:
+                device = self.device
+                net = self.load(spec)
+            try:
+                return fn(net, device)
+            except Exception as exc:
+                if not device.is_gpu:
+                    if is_oom(exc):
+                        raise OutOfMemoryError(
+                            f"The computer ran out of memory while running {spec.name}.",
+                            ["Close other applications", "Use a smaller image"],
+                        ) from exc
+                    raise
+                if isinstance(exc, (UpscalerError, CancelledError)):
+                    raise
+                oom = is_oom(exc)
+                if not oom:
+                    log.exception("GPU inference failed (%s)", spec.id)
+                if not self.cpu_fallback:
+                    if oom:
+                        raise gpu_oom_error() from exc
+                    raise DeviceError(
+                        f"The GPU reported an error: {str(exc).splitlines()[0][:200]}",
+                        ["Switch the processing device to CPU in Settings"],
+                    ) from exc
+                gc.collect()
+                dm.empty_cache(device)
+                self._switch_to_cpu(device, "GPU ran out of memory" if oom else "GPU error")
+            finally:
+                if release and device.is_gpu:
+                    dm.empty_cache(device)
+
     def choose_tile_size(
         self, spec: ModelSpec, height: int, width: int, device: dm.DeviceInfo
     ) -> int:

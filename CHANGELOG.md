@@ -4,6 +4,48 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] - 2026-10-08
+
+### Added
+
+- **AI Photo Restoration** ("Restore Photos" mode in the app, `--restore` on the
+  command line) for old scanned photographs, entirely on the computer:
+  - Scan cleanup with conventional image processing: dust and speck removal,
+    scratch reduction, noise reduction (gentle on grain, strong on colour
+    noise), faded-image recovery, automatic correction of yellowing and colour
+    casts, noise-aware sharpening.
+  - Face restoration with GFPGAN v1.4 (Off / Natural / Strong) with identity
+    protection: only the facial area is replaced, the original's shape, skin
+    tone and lighting are kept, and tiny, uncertain or badly damaged faces are
+    restored only lightly. *Restoration fidelity* (Original ↔ AI enhanced).
+  - Black-and-white detection (also sepia-toned and yellowed prints), with a
+    "Restore in B&W / Restore & Colorize" choice — never colorized without
+    consent; colour photos are never colorized.
+  - Colorization with DeOldify (Artistic) toned for natural, historical
+    colour: style, strength (0 % = grey) and *Preserve original tones*.
+  - Levels Light / Standard / Heavy / Custom, presets Restore / Restore +
+    Colorize / Restore + Upscale / Full Restoration, manual colour correction
+    (using the lighting engine), and Modern Finish (Natural, Clean, Vivid,
+    Professional).
+  - Restoration + Real-ESRGAN upscaling, or AI detail reconstruction without
+    upscaling (Heavy).
+  - "Preview Restoration" in the compare window; restored results compare as
+    *Original Scan* / *Restored*.
+  - Output in a `restored` folder: `photo_restored.jpg`,
+    `photo_restored_colorized.jpg`, `photo_restored_4x.jpg`.
+- Model manager: GFPGAN (Apache-2.0), RetinaFace (MIT) and DeOldify (MIT)
+  models, grouped by purpose and shown with version, size and license; asked
+  before downloading.
+- CLI: `--restore`, `--restore-level`, `--colorize`, `--colorize-strength`,
+  `--upscale`, `--face`, `--fidelity`, `--modern`; `--list-models` groups models.
+
+### Changed
+
+- Originals are never overwritten, whatever the output folder and file-name
+  template (previously possible with `{name}` + the original's folder + Overwrite).
+- Restoration results in `restored` folders are skipped when adding folders, like
+  `upscaled` folders (other images in a folder of that name are still added).
+
 ## [1.1.0] - 2026-10-08
 
 ### Added

@@ -1,7 +1,12 @@
 """AI model definitions. Importing this package registers all built-in models."""
 
-from pixelift.models import realesrgan  # noqa: F401  (registers models)
+from pixelift.models import realesrgan, restoration  # noqa: F401  (registers models)
 from pixelift.models.base import (
+    COLORIZE,
+    FACE_DETECT,
+    FACE_RESTORE,
+    KIND_LABELS,
+    UPSCALE,
     ModelFamily,
     ModelSpec,
     all_families,
@@ -11,9 +16,15 @@ from pixelift.models.base import (
     get_spec,
     register,
     register_family,
+    specs_of_kind,
 )
 
 __all__ = [
+    "COLORIZE",
+    "FACE_DETECT",
+    "FACE_RESTORE",
+    "KIND_LABELS",
+    "UPSCALE",
     "ModelFamily",
     "ModelSpec",
     "all_families",
@@ -23,4 +34,5 @@ __all__ = [
     "get_spec",
     "register",
     "register_family",
+    "specs_of_kind",
 ]

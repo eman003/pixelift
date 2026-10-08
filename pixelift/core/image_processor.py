@@ -1,5 +1,9 @@
 """Single-image pipeline: load -> lighting -> upscale -> restore alpha/mode -> save.
 
+With ``ProcessingOptions.restoration`` set, the photo-restoration pipeline
+(which applies the lighting and upscales itself) replaces the middle steps;
+loading, metadata, output naming and saving are shared.
+
 Shared by the GUI and the CLI.
 """
 
@@ -12,7 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from PIL import Image
@@ -20,8 +24,12 @@ from PIL import Image
 from pixelift.core.control import JobControl
 from pixelift.core.errors import ImageTooLargeError, OutputError, UpscalerError
 from pixelift.core.lighting import LightingSettings, apply_lighting
+from pixelift.core.restoration.settings import RestorationSettings
 from pixelift.core.upscaler import Upscaler
 from pixelift.utils import image_utils as iu
+
+if TYPE_CHECKING:
+    from pixelift.core.restoration.pipeline import Restorer
 from pixelift.utils.metadata import save_kwargs
 from pixelift.utils.system import available_ram_bytes
 
@@ -49,9 +57,18 @@ class ProcessingOptions:
     preserve_metadata: bool = True
     jpeg_background: tuple[int, int, int] = (255, 255, 255)
     lighting: LightingSettings = field(default_factory=LightingSettings)
+    # Photo restoration instead of plain upscaling (None = upscaling).
+    restoration: RestorationSettings | None = None
+
+    @property
+    def output_scale(self) -> int:
+        """How much larger the output is than the input."""
+        return self.restoration.scale if self.restoration is not None else self.scale
 
     def validate(self) -> None:
-        if self.scale not in (2, 3, 4):
+        if self.restoration is not None:
+            self.restoration.validate()
+        elif self.scale not in (2, 3, 4):
             raise ValueError("scale must be 2, 3 or 4")
         if self.output_format not in iu.OUTPUT_FORMATS:
             raise ValueError(f"unsupported output format: {self.output_format}")
@@ -69,27 +86,90 @@ class ProcessResult:
     skipped: bool = False
     note: str = ""
     lighting: str = ""  # LightingSettings.tag() the output was made with
+    restoration: str | None = None  # restoration_tag() the output was made with; None: upscaled
+    colorized: bool = False
+    faces: int = 0  # faces restored
+
+    @property
+    def restored(self) -> bool:
+        return self.restoration is not None
 
 
-def output_path_for(source: Path, width: int, height: int, options: ProcessingOptions) -> Path:
+def will_colorize(source: Path, options: ProcessingOptions) -> bool:
+    """Whether restoring ``source`` with ``options`` colorizes it.
+
+    Only black-and-white photos are ever colorized, and only when asked to.
+    """
+    restoration = options.restoration
+    if restoration is None or not restoration.colorize or restoration.colorize_strength <= 0:
+        return False
+    from pixelift.core.restoration.analysis import detect_monochrome_file
+
+    try:
+        return detect_monochrome_file(source).monochrome
+    except (OSError, UpscalerError):
+        return False
+
+
+def restoration_tag(options: ProcessingOptions, colorized: bool) -> str:
+    """Identifies what a restored output was made with (for staleness checks)."""
+    assert options.restoration is not None
+    return f"{options.restoration.tag(colorized)}|{int(colorized)}|{options.restoration.scale}"
+
+
+def restoration_template(restoration: RestorationSettings, colorized: bool) -> str:
+    """``{name}_restored[-tag][_colorized][_{scale}x]`` (lighting tag appended later)."""
+    tag = restoration.tag(colorized)
+    template = "{name}_restored" + (f"-{tag}" if tag else "")
+    if colorized:
+        template += "_colorized"
+    if restoration.scale > 1:
+        template += "_{scale}x"
+    return template
+
+
+def output_path_for(
+    source: Path,
+    width: int,
+    height: int,
+    options: ProcessingOptions,
+    colorized: bool | None = None,
+) -> Path:
     _, ext = iu.OUTPUT_FORMATS[options.output_format]
-    folder = options.output_dir or iu.default_output_dir(source)
+    restoration = options.restoration
+    folder = options.output_dir or iu.default_output_dir(source, restored=restoration is not None)
+    scale = options.output_scale
+    if restoration is not None:
+        if colorized is None:
+            colorized = will_colorize(source, options)
+        template = restoration_template(restoration, colorized)
+    else:
+        template = options.filename_template
     name = iu.render_filename(
-        options.filename_template,
+        template,
         source,
-        options.scale,
+        scale,
         options.model,
-        width * options.scale,
-        height * options.scale,
+        width * scale,
+        height * scale,
         ext,
         options.lighting.tag(),
     )
     return folder / name
 
 
-def reserve_output(output: Path, existing: ExistingPolicy, claim: OutputClaim | None) -> Path:
-    """``output``, or ``output (2)``… when another source already claimed it."""
+def reserve_output(
+    output: Path, existing: ExistingPolicy, claim: OutputClaim | None, source: Path | None = None
+) -> Path:
+    """``output``, or ``output (2)``… when another source already claimed it.
+
+    Never the ``source`` file itself: originals are never overwritten, whatever
+    the output folder and file-name template.
+    """
+    source_key = _same_file_key(source) if source is not None else None
     for candidate in iu.numbered_paths(output):
+        if source_key is not None and _same_file_key(candidate) == source_key:
+            continue
         if existing == "rename" and candidate.exists():
             continue
         if claim is None or claim(candidate):
@@ -100,9 +180,17 @@ def reserve_output(output: Path, existing: ExistingPolicy, claim: OutputClaim | 
     )
 
 
+def _same_file_key(path: Path) -> tuple[int, int] | Path:
+    try:
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino)
+    except OSError:
+        return path.resolve()
+
+
 def check_feasible(width: int, height: int, options: ProcessingOptions, output: Path) -> None:
     """Fail early (before minutes of work) on impossible jobs."""
-    out_w, out_h = width * options.scale, height * options.scale
+    out_w, out_h = width * options.output_scale, height * options.output_scale
     if options.output_format == "webp" and max(out_w, out_h) > iu.WEBP_MAX_DIMENSION:
         raise ImageTooLargeError(
             f"The result ({out_w}×{out_h}) exceeds WebP's maximum of "
@@ -115,6 +203,14 @@ def check_feasible(width: int, height: int, options: ProcessingOptions, output: 
         )
     # Output buffer + one copy while encoding, plus the decoded input.
     needed = out_w * out_h * 4 * 2 + width * height * 4
+    if options.restoration is not None:
+        # Each stage keeps its input and output (3 bytes/pixel each), and
+        # upscaling blends the AI result with a resized copy.
+        needed += width * height * 3 * 4 + out_w * out_h * 3 * 2
+        ai_scale = options.restoration.ai_scale()
+        if ai_scale > options.output_scale:
+            # Detail reconstruction: the AI result at 2× before it is resized back.
+            needed += width * height * ai_scale * ai_scale * 3
     available = available_ram_bytes()
     if needed > available:
         raise ImageTooLargeError(
@@ -156,20 +252,32 @@ def process_image(
     progress: Progress | None = None,
     control: JobControl | None = None,
     claim: OutputClaim | None = None,
+    restorer: Restorer | None = None,
 ) -> ProcessResult:
-    """Upscale one file and write the result. Raises UpscalerError subclasses."""
+    """Upscale (or restore) one file and write the result. Raises UpscalerError subclasses.
+
+    ``restorer`` is the batch's shared restoration engine (created on demand).
+    The source file is only ever read.
+    """
     started = time.monotonic()
     source = Path(source)
     options.validate()
     report = progress or (lambda _f, _s: None)
+    scale = options.output_scale
+    restoring = options.restoration is not None
+    colorize = will_colorize(source, options) if restoring else False
+    tag = restoration_tag(options, colorize) if restoring else None
 
     info = iu.probe_image(source)
     output = reserve_output(
-        output_path_for(source, info.width, info.height, options), options.existing, claim
+        output_path_for(source, info.width, info.height, options, colorize),
+        options.existing,
+        claim,
+        source,
     )
     if options.existing == "skip" and output.exists():
         log.info("Skipping %s: %s exists", source, output)
-        out_size = (info.width * options.scale, info.height * options.scale)
+        out_size = (info.width * scale, info.height * scale)
         return ProcessResult(
             source,
             output,
@@ -178,6 +286,8 @@ def process_image(
             skipped=True,
             note="Output already exists",
             lighting=options.lighting.tag(),
+            restoration=tag,
+            colorized=colorize,
         )
     check_feasible(info.width, info.height, options, output)
 
@@ -186,23 +296,33 @@ def process_image(
     if control:
         control.check()
 
-    # Lighting goes before the AI model: it is cheaper at the input resolution,
-    # and the model then reconstructs detail from the corrected tones (which is
-    # also what the preview shows). In place, so no extra full-size copy.
     lighting = options.lighting.adjustments()
-    if not lighting.is_neutral:
-        report(0.01, "Adjusting lighting")
-        apply_lighting(loaded.rgb, lighting, out=loaded.rgb)
-        if control:
-            control.check()
+    note = ""
+    faces = 0
+    if restoring:
+        rgb, keep_gray, faces, note = _restore(
+            source, loaded, options, upscaler, restorer, colorize, report, control
+        )
+    else:
+        # Lighting goes before the AI model: it is cheaper at the input
+        # resolution, and the model then reconstructs detail from the corrected
+        # tones (which is also what the preview shows). In place, so no extra
+        # full-size copy.
+        if not lighting.is_neutral:
+            report(0.01, "Adjusting lighting")
+            apply_lighting(loaded.rgb, lighting, out=loaded.rgb)
+            if control:
+                control.check()
 
-    def on_tiles(done: int, total: int) -> None:
-        report(0.02 + 0.9 * done / max(total, 1), f"Upscaling (tile {done}/{total})")
+        def on_tiles(done: int, total: int) -> None:
+            report(0.02 + 0.9 * done / max(total, 1), f"Upscaling (tile {done}/{total})")
 
-    report(0.02, "Upscaling")
-    rgb = upscaler.upscale(
-        loaded.rgb, options.scale, options.model, progress=on_tiles, control=control
-    )
+        report(0.02, "Upscaling")
+        rgb = upscaler.upscale(
+            loaded.rgb, options.scale, options.model, progress=on_tiles, control=control
+        )
+        # A warmed, cooled or tinted grey source keeps that colour (as previewed).
+        keep_gray = loaded.grayscale and not lighting.changes_colour
     out_h, out_w = rgb.shape[:2]
     in_size = (loaded.width, loaded.height)
     del loaded.rgb  # free the decoded input before encoding the output
@@ -210,23 +330,21 @@ def process_image(
     report(0.93, "Saving")
     img = Image.fromarray(rgb, "RGB")
     del rgb
-    note = ""
     if loaded.alpha is not None:
         alpha = Image.fromarray(loaded.alpha, "L").resize((out_w, out_h), Image.Resampling.LANCZOS)
         if options.output_format == "jpeg":
             background = Image.new("RGB", img.size, options.jpeg_background)
             background.paste(img, mask=alpha)
             img = background
-            note = "Transparency flattened (JPEG has no alpha channel)"
+            note = _join(note, "Transparency flattened (JPEG has no alpha channel)")
         else:
             img.putalpha(alpha)
-    elif loaded.grayscale and not lighting.changes_colour:
-        # A warmed, cooled or tinted grey source keeps that colour (as previewed).
+    elif keep_gray:
         img = img.convert("L")
 
     fmt, _ = iu.OUTPUT_FORMATS[options.output_format]
     meta = loaded.metadata if options.preserve_metadata else None
-    kwargs = save_kwargs(fmt, meta, options.quality, options.scale)
+    kwargs = save_kwargs(fmt, meta, options.quality, scale)
     if control:
         control.check()
     try:
@@ -243,7 +361,8 @@ def process_image(
         img.close()
 
     elapsed = time.monotonic() - started
-    log.info("Upscaled %s -> %s (%dx%d) in %.1fs", source, output, out_w, out_h, elapsed)
+    verb = "Restored" if restoring else "Upscaled"
+    log.info("%s %s -> %s (%dx%d) in %.1fs", verb, source, output, out_w, out_h, elapsed)
     report(1.0, "Done")
     return ProcessResult(
         source,
@@ -253,7 +372,56 @@ def process_image(
         elapsed,
         note=note,
         lighting=options.lighting.tag(),
+        restoration=tag,
+        colorized=colorize,
+        faces=faces,
     )
+
+
+def _restore(
+    source: Path,
+    loaded: iu.LoadedImage,
+    options: ProcessingOptions,
+    upscaler: Upscaler,
+    restorer: Restorer | None,
+    colorize: bool,
+    report: Progress,
+    control: JobControl | None,
+) -> tuple[np.ndarray, bool, int, str]:
+    """Run the restoration pipeline: (rgb, save as grey, faces restored, note)."""
+    from pixelift.core.restoration.analysis import MonoInfo, detect_monochrome_file
+    from pixelift.core.restoration.pipeline import Restorer
+
+    assert options.restoration is not None
+    restorer = restorer or Restorer(upscaler)
+    # The same (cached) detection that named the output file.
+    mono = MonoInfo(True, False, 0.0) if loaded.grayscale else detect_monochrome_file(source)
+    settings = options.restoration
+    if mono.monochrome != colorize and settings.colorize and settings.colorize_strength > 0:
+        # Only possible if the file changed since it was named; follow the name.
+        mono = MonoInfo(colorize, mono.toned, mono.colorfulness)
+    result = restorer.restore(
+        loaded.rgb,
+        settings,
+        model=options.model,
+        lighting=options.lighting.adjustments(),
+        mono=mono,
+        progress=lambda f, stage: report(0.01 + 0.91 * f, stage),
+        control=control,
+    )
+    notes = []
+    if result.colorized:
+        notes.append("Colorized")
+    elif result.monochrome:
+        notes.append("Black & white")
+    if result.faces.restored:
+        count = result.faces.restored
+        notes.append(f"{count} face{'s' if count != 1 else ''} restored")
+    return result.rgb, result.monochrome, result.faces.restored, " · ".join(notes)
+
+
+def _join(first: str, second: str) -> str:
+    return f"{first} · {second}" if first else second
 
 
 def test_pattern(size: int = 48) -> np.ndarray:

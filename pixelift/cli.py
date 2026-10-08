@@ -14,8 +14,9 @@ from pixelift.core.control import JobControl
 from pixelift.core.errors import CancelledError, UpscalerError, friendly_error
 from pixelift.core.lighting import all_profiles, get_profile
 from pixelift.core.model_manager import ModelManager
+from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
-from pixelift.models import all_families
+from pixelift.models import KIND_LABELS, all_families
 from pixelift.storage.settings import load_settings
 from pixelift.utils.image_utils import OUTPUT_FORMATS, collect_images, human_size
 from pixelift.utils.logging import setup_logging
@@ -39,6 +40,44 @@ def build_parser() -> argparse.ArgumentParser:
         "Run without arguments to open the desktop app. Your images stay on your computer.",
     )
     parser.add_argument("inputs", nargs="*", type=Path, help="image files or folders")
+    restore = parser.add_argument_group(
+        "photo restoration",
+        "Restore old photographs instead of only upscaling them. Everything runs "
+        "locally; originals are never modified (results go to <input dir>/restored).",
+    )
+    restore.add_argument(
+        "-r",
+        "--restore",
+        action="store_true",
+        help="restore photos (dust, scratches, colour, faces)",
+    )
+    restore.add_argument(
+        "--restore-level",
+        choices=rs.LEVELS[:-1],
+        default=None,
+        help="light, standard (default) or heavy; 'custom' uses the values set in the app",
+    )
+    restore.add_argument(
+        "--colorize",
+        action="store_true",
+        help="colorize black-and-white photos (colour photos are never colorized)",
+    )
+    restore.add_argument(
+        "--colorize-strength", type=_percent, metavar="PERCENT", help="0 = grey … 100 = full colour"
+    )
+    restore.add_argument(
+        "--upscale", action="store_true", help="also upscale restored photos by --scale"
+    )
+    restore.add_argument(
+        "--face", choices=rs.FACE_MODES, help="face restoration (default: natural)"
+    )
+    restore.add_argument(
+        "--fidelity",
+        type=_percent,
+        metavar="PERCENT",
+        help="0 keeps the original pixels, 100 trusts the AI fully (default: 50)",
+    )
+    restore.add_argument("--modern", choices=rs.MODERN_MODES, help="Modern Finish look")
     parser.add_argument("-s", "--scale", type=int, choices=(2, 4), default=settings.scale)
     parser.add_argument(
         "-m",
@@ -172,16 +211,72 @@ def _list_models(manager: ModelManager) -> None:
     for fam in all_families():
         variants = ", ".join(f"{s}×" for s in sorted(fam.variants))
         print(f"  {fam.id:<24} {fam.name} [{variants}]")
-    print("\nModel files:")
-    for status in manager.statuses():
-        spec = status.spec
-        mark = "✓" if status.installed else "○"
-        state = "installed" if status.installed else "not installed"
-        print(
-            f"  {mark} {spec.id:<26} {spec.name:<36} {spec.size_mb:6.1f} MB  {state}"
-            f"  [{spec.license}]"
-        )
+    statuses = manager.statuses()
+    for label in dict.fromkeys(KIND_LABELS.values()):  # unique, in order
+        group = [st for st in statuses if KIND_LABELS.get(st.spec.kind) == label]
+        if not group:
+            continue
+        print(f"\n{label} models:")
+        for status in group:
+            spec = status.spec
+            mark = "✓" if status.installed else "○"
+            state = "installed" if status.installed else "not installed"
+            print(
+                f"  {mark} {spec.id:<26} {spec.name:<34} {spec.version:<16} "
+                f"{spec.size_mb:6.1f} MB  {state}  [{spec.license}]"
+            )
     print(f"\nModels directory: {manager.models_dir}")
+
+
+def _restoration_from_args(args: argparse.Namespace, settings: object) -> rs.RestorationSettings:
+    """Restoration settings: the app's saved values, overridden by the options."""
+    import dataclasses
+
+    base = settings.restoration()  # type: ignore[attr-defined]
+    level = args.restore_level or base.level
+    custom = base.custom
+    if args.face is not None:
+        stages = custom if level == rs.CUSTOM else rs.LEVEL_STAGES[level]
+        if stages.face != args.face:
+            custom = dataclasses.replace(stages, face=args.face)
+            level = rs.CUSTOM
+    return dataclasses.replace(
+        base,
+        level=level,
+        custom=custom,
+        colorize=args.colorize,
+        colorize_strength=(
+            args.colorize_strength if args.colorize_strength is not None else base.colorize_strength
+        ),
+        fidelity=args.fidelity if args.fidelity is not None else base.fidelity,
+        modern=args.modern or base.modern,
+        scale=args.scale if args.upscale else 1,
+    )
+
+
+def _check_restoration_models(manager: ModelManager, options: object, images: list[Path]) -> None:
+    from pixelift.core.errors import ModelNotInstalledError
+    from pixelift.core.image_processor import will_colorize
+    from pixelift.core.restoration.pipeline import required_models
+
+    restoration = options.restoration  # type: ignore[attr-defined]
+    ai_scale = restoration.ai_scale()
+    if ai_scale:  # upscaling or AI detail reconstruction
+        manager.resolve(options.model, ai_scale)  # type: ignore[attr-defined]
+    # Colorization is only needed when some input is black and white.
+    any_mono = restoration.colorize and any(will_colorize(p, options) for p in images)
+    missing = [
+        manager.spec(model_id)
+        for model_id in required_models(restoration, monochrome=any_mono)
+        if not manager.is_installed(model_id)
+    ]
+    if missing:
+        names = ", ".join(f"{s.name} ({s.size_mb:.0f} MB)" for s in missing)
+        downloads = " ".join(f"--download-model {s.id}" for s in missing)
+        raise ModelNotInstalledError(
+            f"This restoration needs AI models that are not installed: {names}.",
+            [f"Run: pixelift {downloads}", "Or use --face off (and no --colorize)"],
+        )
 
 
 def _download(manager: ModelManager, ids: list[str]) -> int:
@@ -218,6 +313,17 @@ def run_cli(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     if args.lighting == "custom" and args.lighting_intensity is not None:
         parser.error("--lighting-intensity does not apply to --lighting custom")
+    restore_only = (
+        "restore_level",
+        "colorize",
+        "colorize_strength",
+        "upscale",
+        "face",
+        "fidelity",
+        "modern",
+    )
+    if not args.restore and any(getattr(args, name) not in (None, False) for name in restore_only):
+        parser.error("the photo restoration options need --restore")
     log_path = setup_logging(args.verbose, console=args.verbose)
     manager = ModelManager()
 
@@ -274,9 +380,14 @@ def run_cli(argv: list[str]) -> int:
     if args.lighting_intensity is not None:
         settings.lighting_intensity = args.lighting_intensity
     options.lighting = settings.normalise().lighting()
+    if args.restore:
+        options.restoration = _restoration_from_args(args, settings)
     try:
         options.validate()
-        manager.resolve(options.model, options.scale)
+        if options.restoration is None:
+            manager.resolve(options.model, options.scale)
+        else:
+            _check_restoration_models(manager, options, images)
     except ValueError as exc:
         print(f"Invalid option: {exc}", file=sys.stderr)
         return 2
@@ -292,10 +403,23 @@ def run_cli(argv: list[str]) -> int:
         lighting = f" · lighting {name}"
         if options.lighting.profile != "custom":
             lighting += f" {options.lighting.intensity}%"
-    print(
-        f"{len(images)} image(s) · {options.scale}× · model {options.model} · "
-        f"{options.output_format.upper()}{lighting}"
-    )
+    if options.restoration is not None:
+        restoration = options.restoration
+        parts = [rs.LEVEL_LABELS[restoration.level] + " restoration"]
+        parts.append(f"faces {restoration.stages().face}")
+        if restoration.colorize:
+            parts.append("colorize B&W")
+        if restoration.scale > 1:
+            parts.append(f"{restoration.scale}× upscale")
+        summary_text = " · ".join(parts)
+        print(
+            f"{len(images)} image(s) · {summary_text} · {options.output_format.upper()}{lighting}"
+        )
+    else:
+        print(
+            f"{len(images)} image(s) · {options.scale}× · model {options.model} · "
+            f"{options.output_format.upper()}{lighting}"
+        )
     printer = _Printer(len(images))
     holder: dict[str, BatchProcessor] = {}
     upscaler = TorchUpscaler(
@@ -322,8 +446,9 @@ def run_cli(argv: list[str]) -> int:
         return 130
     except CancelledError:
         return 130
+    verb = "restored" if options.restoration is not None else "upscaled"
     print(
-        f"\nFinished in {summary.seconds:.1f}s: {summary.done} upscaled, "
+        f"\nFinished in {summary.seconds:.1f}s: {summary.done} {verb}, "
         f"{summary.skipped} skipped, {summary.failed} failed."
     )
     if summary.failed and log_path:

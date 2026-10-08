@@ -66,9 +66,11 @@ def test_collect_images_filters_and_skips_output(tmp_path, image_factory):
     image_factory("a.png")
     image_factory("sub/b.jpg")
     image_factory("upscaled/a_4x.png")
+    image_factory("restored/a_restored.png")
+    image_factory("family/restored/scan.png")  # the user's own folder of that name
     (tmp_path / "in" / "notes.txt").write_text("x")
     found = iu.collect_images([tmp_path / "in"])
-    assert sorted(p.name for p in found) == ["a.png", "b.jpg"]
+    assert sorted(p.name for p in found) == ["a.png", "b.jpg", "scan.png"]
     assert [p.name for p in iu.collect_images([tmp_path / "in"], recursive=False)] == ["a.png"]
 
 

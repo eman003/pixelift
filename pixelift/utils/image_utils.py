@@ -26,6 +26,8 @@ OUTPUT_FORMATS = {"png": ("PNG", ".png"), "jpeg": ("JPEG", ".jpg"), "webp": ("WE
 WEBP_MAX_DIMENSION = 16383
 JPEG_MAX_DIMENSION = 65500
 DEFAULT_TEMPLATE = "{name}_{scale}x"
+# Default output folders (next to the originals); never re-ingested as input.
+UPSCALED_DIR, RESTORED_DIR = "upscaled", "restored"
 _ORIENTATION_SWAPS = {5, 6, 7, 8}
 
 
@@ -74,7 +76,7 @@ def collect_images(paths: Iterable[Path], recursive: bool = True) -> list[Path]:
             pattern = "**/*" if recursive else "*"
             children = sorted(p for p in path.glob(pattern) if p.is_file() and is_supported(p))
             # Never re-ingest our own output folders.
-            children = [p for p in children if "upscaled" not in p.relative_to(path).parts[:-1]]
+            children = [p for p in children if not _is_own_output(p.relative_to(path))]
         elif path.is_file() and is_supported(path):
             children = [path]
         else:
@@ -85,6 +87,19 @@ def collect_images(paths: Iterable[Path], recursive: bool = True) -> list[Path]:
                 seen.add(key)
                 found.append(child)
     return found
+
+
+def _is_own_output(relative: Path) -> bool:
+    """Whether ``relative`` (inside a dropped folder) is one of Pixelift's results.
+
+    Everything in an ``upscaled`` folder counts; in a ``restored`` folder only
+    restoration results do (``<name>_restored…``), since people often keep
+    their own restored scans in a folder of that name.
+    """
+    folders = relative.parts[:-1]
+    if UPSCALED_DIR in folders:
+        return True
+    return RESTORED_DIR in folders and "_restored" in relative.stem
 
 
 def _open(path: Path) -> Image.Image:
@@ -255,8 +270,8 @@ def human_size(num_bytes: float) -> str:
     return f"{num_bytes:.1f} GB"
 
 
-def default_output_dir(source: Path) -> Path:
-    return source.parent / "upscaled"
+def default_output_dir(source: Path, restored: bool = False) -> Path:
+    return source.parent / (RESTORED_DIR if restored else UPSCALED_DIR)
 
 
 def disk_free(path: Path) -> int:

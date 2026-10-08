@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pixelift"
 dynamic = ["version"]
-description = "Pixelift — local AI image upscaler for the Linux desktop (Real-ESRGAN, GTK4/libadwaita)"
+description = "Pixelift — local AI image upscaler and photo restorer for the Linux desktop (Real-ESRGAN, GFPGAN, DeOldify; GTK4/libadwaita)"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
 authors = [{ name = "Pixelift contributors" }]
-keywords = ["upscaling", "super-resolution", "real-esrgan", "gtk4", "ubuntu"]
+keywords = ["upscaling", "super-resolution", "real-esrgan", "photo-restoration", "gfpgan", "colorization", "gtk4", "ubuntu"]
 classifiers = [
   "Programming Language :: Python :: 3.12",
   "Operating System :: POSIX :: Linux",

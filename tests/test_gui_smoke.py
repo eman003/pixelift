@@ -125,3 +125,90 @@ def test_lighting_controls_custom_and_reset():
     assert (app.settings.lighting_profile, app.settings.lighting_intensity) == ("original", 100)
     assert controls.profile_dd.get_selected() == 0
     controls.shutdown()
+
+
+class _RestoreStubApp(_StubApp):
+    """Enough of the application for the restoration widgets."""
+
+    def __init__(self, models_dir):
+        super().__init__()
+        from pixelift.core.model_manager import ModelManager
+        from pixelift.ui.downloads import DownloadTracker
+
+        self.settings.mode = "restore"
+        self.model_manager = ModelManager(models_dir)
+        self.downloads = DownloadTracker(self.model_manager)
+        self.settings_listeners = []
+        self.changes = 0
+        self.shown = []
+
+    def on_settings_changed(self, listener):
+        self.settings_listeners.append(listener)
+
+    def off_settings_changed(self, listener):
+        self.settings_listeners.remove(listener)
+
+    def settings_changed(self):
+        self.changes += 1
+        self.settings.normalise()
+        for listener in list(self.settings_listeners):
+            listener()
+
+    def show_preferences(self, page=None):
+        self.shown.append(page)
+
+
+def test_restoration_dialog_edits_settings(models_dir):
+    from pixelift.core.restoration import settings as rs
+    from pixelift.ui.widgets.restoration import RestorationDialog, RestorationPanel
+
+    app = _RestoreStubApp(models_dir)
+    panel = RestorationPanel(app, lambda: None)
+    dialog = RestorationDialog(app)
+    assert dialog.face_buttons[rs.FACE_NATURAL].get_active()  # Standard: Natural faces
+    assert not dialog.colorize_group.get_sensitive()  # no colorization without consent
+    # Moving a damage slider turns the level into Custom, starting from Standard.
+    dialog.stage_sliders["dust"].set_value(90)
+    assert app.settings.restore_level == rs.CUSTOM and app.settings.restore_dust == 90
+    assert app.settings.restore_scratches == rs.LEVEL_STAGES[rs.STANDARD].scratches
+    dialog.saver.flush()
+    assert panel.level_dd.get_selected() == rs.LEVELS.index(rs.CUSTOM)
+    dialog.face_buttons[rs.FACE_OFF].set_active(True)
+    assert app.settings.restoration().stages().face == rs.FACE_OFF
+    # Choosing a colorize preset in the panel enables the colorization options.
+    panel.preset_dd.set_selected(rs.PRESETS.index(rs.PRESET_COLORIZE))
+    assert app.settings.restore_preset == rs.PRESET_COLORIZE
+    assert dialog.colorize_group.get_sensitive()
+    dialog.strength.set_value(25)
+    assert "subtle" in dialog.strength_row.get_subtitle()
+    # Model status: nothing installed in the test models folder.
+    assert all(row.get_subtitle() == "Not installed" for row, _icon in dialog.model_rows)
+    dialog._manage_models()
+    assert app.shown == ["models"]
+
+
+def test_black_and_white_banner_and_row(tmp_path):
+    from conftest import make_image
+
+    from pixelift.core.batch_processor import QueueItem
+    from pixelift.ui.image_queue import QueueRow
+    from pixelift.ui.widgets.restoration import BlackAndWhiteBanner
+    from pixelift.utils.image_utils import make_thumbnail, probe_image
+
+    choices = []
+    banner = BlackAndWhiteBanner(choices.append)
+    banner.show_for(2)
+    assert banner.get_reveal_child() and "2 Black & White" in banner.title.get_label()
+    keep, colorize = list(banner.buttons)
+    keep.emit("clicked")
+    colorize.emit("clicked")
+    assert choices == [False, True]
+
+    path = make_image(tmp_path / "old.png", mode="L")
+    row = QueueRow(QueueItem(path), *(lambda _r: None,) * 4)
+    row.set_info(probe_image(path), make_thumbnail(path), True)
+    row.set_scale(1, show_monochrome=True)
+    label = row.details.get_label()
+    assert label.startswith("40×30 · ") and label.endswith("→  40×30 · B&W")
+    row.set_scale(4, show_monochrome=False)
+    assert "B&W" not in row.details.get_label()

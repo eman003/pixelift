@@ -8,6 +8,11 @@ drawn on top — the full-resolution image is never kept in memory by the UI.
 Before an image is upscaled, the "after" side previews the lighting profile:
 it is applied to a downscaled copy of the original (never the AI model), and
 to the decoded region when zoomed in, so slider changes update in a moment.
+
+In Restore Photos mode, "Preview Restoration" runs the full restoration
+(without upscaling) on that downscaled copy, so settings can be judged before
+the whole photo is processed. Restored results compare as
+"Original Scan" / "Restored".
 """
 
 from __future__ import annotations
@@ -21,8 +26,11 @@ from gi.repository import Adw, Gdk, GLib, GObject, Graphene, Gsk, Gtk, Pango
 from PIL import Image
 
 from pixelift.core.batch_processor import ItemStatus, QueueItem
+from pixelift.core.control import JobControl
+from pixelift.core.errors import CancelledError, UpscalerError, friendly_error
 from pixelift.core.lighting import Adjustments, apply_to_pil
 from pixelift.ui.async_utils import run_in_thread
+from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.ui.widgets.textures import texture_from_pil
 from pixelift.utils.image_utils import ImageInfo, load_preview, load_region
@@ -77,6 +85,7 @@ class CompareView(Gtk.Widget):
         self.after = _Side()
         self.image_size: tuple[int, int] = (0, 0)  # logical size = upscaled size
         self.mode = "slider"
+        self.before_label = "Before"
         self.after_label = "After"
         self.split = 0.5
         self.zoom: float | None = None  # None = fit to window
@@ -332,7 +341,7 @@ class CompareView(Gtk.Widget):
         mode = self.mode if has_both else ("after" if self.after.texture else "before")
         if mode == "before":
             self._draw_side(snapshot, self.before, origin, zoom, filt)
-            self._label(snapshot, "Before", 12, 12)
+            self._label(snapshot, self.before_label, 12, 12)
         elif mode == "after":
             self._draw_side(snapshot, self.after, origin, zoom, filt)
             self._label(snapshot, self.after_label if has_both else "Upscaled", 12, 12)
@@ -367,7 +376,7 @@ class CompareView(Gtk.Widget):
             snapshot.append_layout(arrows, _rgba("#333333"))
             snapshot.restore()
             if sx > 90:
-                self._label(snapshot, "Before", 12, 12)
+                self._label(snapshot, self.before_label, 12, 12)
             if w - sx > 90:
                 self._label(snapshot, self.after_label, w - 12, 12, align_right=True)
 
@@ -390,8 +399,16 @@ class PreviewWindow(Adw.Window):
             else None
         )
         self.output = output if output and output.exists() else None
+        self.restored = bool(self.output and item.result and item.result.restored)
+        self._restore_busy = False
+        self._restore_control: JobControl | None = None  # the running restoration preview
+        self._closed = False
+        self._restore_shown = False  # the after side shows a restoration preview
 
         self.view = CompareView()
+        if self.restored:
+            self.view.before_label = "Original Scan"
+            self.view.after_label = "Restored"
         self.view.before.path = item.path
         self.view.after.path = self.output
         self.view.connect("view-changed", lambda _v: self._update_zoom_label())
@@ -402,6 +419,8 @@ class PreviewWindow(Adw.Window):
         if item.result and self.output:
             ow, oh = item.result.output_size
             subtitle += f"  →  {ow}×{oh}"
+        elif getattr(parent, "restoring", False):
+            subtitle += " · not restored yet"
         else:
             subtitle += " · not upscaled yet"
         header.set_title_widget(Adw.WindowTitle(title=item.path.name, subtitle=subtitle))
@@ -422,6 +441,19 @@ class PreviewWindow(Adw.Window):
         self.modes = modes
         modes.set_sensitive(self.output is not None)
         header.pack_start(modes)
+        if self.restored:
+            self.mode_buttons["before"].set_label("Original")
+            self.mode_buttons["after"].set_label("Restored")
+        self.parent_window = parent
+        self.restore_btn: Gtk.Button | None = None
+        if self.output is None and getattr(parent, "restoring", False):
+            self.restore_btn = Gtk.Button(
+                label="Preview Restoration",
+                tooltip_text="Restore a reduced-size copy with the current settings",
+            )
+            self.restore_btn.add_css_class("suggested-action")
+            self.restore_btn.connect("clicked", lambda _b: self._preview_restoration())
+            header.pack_start(self.restore_btn)
 
         zoom_box = Gtk.Box(css_classes=["linked"])
         zoom_out = Gtk.Button(icon_name="zoom-out-symbolic", tooltip_text="Zoom Out (−)")
@@ -494,6 +526,11 @@ class PreviewWindow(Adw.Window):
         if self.lighting is not None:
             self.lighting.set_sensitive(editable)
 
+    def cancel_restoration(self) -> None:
+        """Stop a running restoration preview (window closed or a batch started)."""
+        if self._restore_control is not None:
+            self._restore_control.cancel()
+
     def _load(self) -> tuple:
         before, before_size = load_preview(self.item.path, PREVIEW_MAX)
         after = after_size = base = None
@@ -522,9 +559,101 @@ class PreviewWindow(Adw.Window):
         self._update_zoom_label()
 
     # --- lighting preview -------------------------------------------------
+    # --- restoration preview ---------------------------------------------
+    def _preview_restoration(self) -> None:
+        if self._lighting_base is None or self._restore_busy:
+            return
+        parent = self.parent_window
+        if getattr(parent, "running", False):
+            show_error(
+                self,
+                UpscalerError(
+                    "Photos are being processed right now.",
+                    ["Preview again when the batch has finished"],
+                    title="Preview unavailable.",
+                ),
+            )
+            return
+        try:
+            restorer, settings, options = parent.preview_restorer()
+        except UpscalerError as err:
+            show_error(self, err)
+            return
+        import dataclasses
+
+        import numpy as np
+
+        base = np.array(self._lighting_base.convert("RGB"))
+        quick = dataclasses.replace(settings, scale=1)  # preview without upscaling
+        control = JobControl()
+        self._restore_control = control
+        self._restore_busy = True
+        self._lighting_generation += 1  # a running lighting render must not replace it
+        self.spinner.set_visible(True)
+        self.restore_btn.set_sensitive(False)
+        self.restore_btn.set_label("Restoring…")
+        lighting = options.lighting.adjustments()
+
+        def work() -> Image.Image:
+            from pixelift.core.restoration.analysis import detect_monochrome_file
+
+            mono = detect_monochrome_file(self.item.path)
+            control.check()
+            result = restorer.restore(
+                base, quick, model=options.model, lighting=lighting, mono=mono, control=control
+            )
+            return Image.fromarray(result.rgb).convert("RGBA")
+
+        def finished() -> bool:
+            """Clean up; False when the window was closed meanwhile."""
+            if self._restore_control is control:
+                self._restore_control = None
+            self._restore_busy = False
+            return not self._closed
+
+        def done(img: Image.Image) -> None:
+            if not finished():
+                return
+            if control.cancelled:  # a batch started meanwhile
+                failed(CancelledError())
+                return
+            self.spinner.set_visible(False)
+            self.restore_btn.set_sensitive(True)
+            self.restore_btn.set_label("Update Preview")
+            after = self.view.after
+            after.texture = texture_from_pil(img)
+            after.path = None  # no full-resolution detail: it is a preview
+            after.detail = None
+            after.transform = None
+            after.source_size = self.view.before.source_size
+            self._restore_shown = True
+            self.view.before_label = "Original Scan"
+            self.view.after_label = "Restored (preview)"
+            self.modes.set_sensitive(True)
+            self.mode_buttons["before"].set_label("Original")
+            self.mode_buttons["after"].set_label("Restored")
+            self.mode_buttons["slider"].set_active(True)
+            self.view.queue_draw()
+
+        def failed(exc: BaseException) -> None:
+            if not finished():
+                return
+            self.spinner.set_visible(False)
+            self.restore_btn.set_sensitive(True)
+            self.restore_btn.set_label("Preview Restoration")
+            if not isinstance(exc, CancelledError):
+                show_error(self, friendly_error(exc))
+
+        run_in_thread(work, on_done=done, on_error=failed, name="preview-restore")
+
     def _update_lighting(self) -> None:
         """Re-render the lighting side if the lighting settings changed."""
         if self._lighting_base is None:
+            return
+        if self._restore_shown or self._restore_busy:
+            # Settings changed after a restoration preview: offer to refresh it.
+            if self.restore_btn is not None and not self._restore_busy:
+                self.restore_btn.set_label("Update Preview")
             return
         wanted = self.app.settings.lighting().adjustments()
         if wanted == self._lighting_shown:
@@ -586,6 +715,8 @@ class PreviewWindow(Adw.Window):
         self.view.queue_draw()
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
+        self._closed = True
+        self.cancel_restoration()
         self._lighting_generation += 1
         self.app.off_lighting_changed(self._update_lighting)
         if self.lighting is not None:

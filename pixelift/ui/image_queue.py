@@ -12,6 +12,7 @@ from PIL import Image, ImageOps
 
 from pixelift.core.batch_processor import ItemStatus, QueueItem
 from pixelift.core.errors import UpscalerError, friendly_error
+from pixelift.core.restoration.analysis import ANALYSIS_SIDE, detect_monochrome_file
 from pixelift.ui.async_utils import idle
 from pixelift.ui.widgets.textures import texture_from_pil
 from pixelift.utils.image_utils import ImageInfo, human_size, make_thumbnail, probe_image
@@ -30,18 +31,25 @@ class ThumbnailLoader:
     def request(
         self,
         path: Path,
-        on_ready: Callable[[ImageInfo, Image.Image], None],
+        on_ready: Callable[[ImageInfo, Image.Image, bool], None],
         on_error: Callable[[UpscalerError], None],
     ) -> None:
         def job() -> None:
             try:
                 info = probe_image(path)
-                thumb = make_thumbnail(path, THUMB_SIZE * 4)
-                thumb = ImageOps.fit(thumb, (THUMB_SIZE * 2, THUMB_SIZE * 2))  # square crop
+                # One reduced decode for both the thumbnail and B&W detection.
+                decoded = make_thumbnail(path, ANALYSIS_SIDE)
+                thumb = ImageOps.fit(decoded, (THUMB_SIZE * 2, THUMB_SIZE * 2))  # square crop
             except Exception as exc:  # noqa: BLE001
                 idle(on_error, friendly_error(exc))
                 return
-            idle(on_ready, info, thumb)
+            try:
+                # Cached: restoration's output naming asks again for free.
+                mono = detect_monochrome_file(path, decoded).monochrome
+            except Exception:
+                log.debug("B&W detection failed for %s", path, exc_info=True)
+                mono = False
+            idle(on_ready, info, thumb, mono)
 
         self._pool.submit(job)
 
@@ -73,7 +81,9 @@ class QueueRow(Gtk.ListBoxRow):
         self.item = item
         self.info: ImageInfo | None = None
         self.load_error: UpscalerError | None = None
-        self.scale = 4
+        self.monochrome = False  # looks like a black-and-white photograph
+        self.show_monochrome = False
+        self.scale = 4  # how much larger the output will be
         self.add_css_class("queue-row")
         self.set_activatable(True)
 
@@ -139,8 +149,9 @@ class QueueRow(Gtk.ListBoxRow):
         return button
 
     # --- data --------------------------------------------------------------
-    def set_info(self, info: ImageInfo, thumb: Image.Image) -> None:
+    def set_info(self, info: ImageInfo, thumb: Image.Image, monochrome: bool = False) -> None:
         self.info = info
+        self.monochrome = monochrome
         self.thumb.set_from_paintable(texture_from_pil(thumb))
         self.refresh()
 
@@ -155,8 +166,10 @@ class QueueRow(Gtk.ListBoxRow):
     def ready(self) -> bool:
         return self.info is not None and self.load_error is None
 
-    def set_scale(self, scale: int) -> None:
+    def set_scale(self, scale: int, show_monochrome: bool = False) -> None:
+        """Output size factor; ``show_monochrome`` tags B&W photos (Restore mode)."""
         self.scale = scale
+        self.show_monochrome = show_monochrome
         self.refresh()
 
     # --- presentation ------------------------------------------------------
@@ -172,9 +185,10 @@ class QueueRow(Gtk.ListBoxRow):
                 out_w, out_h = item.result.output_size
             else:
                 out_w, out_h = info.width * self.scale, info.height * self.scale
-            self.details.set_label(
-                f"{info.width}×{info.height} · {human_size(info.file_size)}  →  {out_w}×{out_h}"
-            )
+            text = f"{info.width}×{info.height} · {human_size(info.file_size)}  →  {out_w}×{out_h}"
+            if self.monochrome and self.show_monochrome:
+                text += " · B&W"
+            self.details.set_label(text)
 
         status = item.status
         text = status.value
@@ -203,6 +217,8 @@ class QueueRow(Gtk.ListBoxRow):
         self.compare_btn.set_tooltip_text(
             "Compare before / after" if has_output else "Preview original"
         )
+        if has_output and item.result and item.result.restored:
+            self.compare_btn.set_tooltip_text("Compare original scan / restored photo")
         self.open_btn.set_visible(has_output)
         self.retry_btn.set_visible(
             status in (ItemStatus.FAILED, ItemStatus.CANCELLED) and self.load_error is None

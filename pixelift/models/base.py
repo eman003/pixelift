@@ -9,6 +9,10 @@ To add a new model (Real-CUGAN, SwinIR, …): implement its network, create
 ``ModelSpec`` objects whose ``build`` returns an ``nn.Module`` taking a
 ``[N, 3, H, W]`` float tensor in ``[0, 1]`` and returning the upscaled tensor,
 and call :func:`register` from a module imported in ``models/__init__``.
+
+Restoration models (face restoration, face detection, colorization) are
+registered the same way with another ``kind``; they share the download,
+verification and loading code but are never offered as upscalers.
 """
 
 from __future__ import annotations
@@ -19,6 +23,20 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from torch import nn
+
+UPSCALE = "upscale"
+FACE_RESTORE = "face-restore"
+FACE_DETECT = "face-detect"
+COLORIZE = "colorize"
+
+KIND_LABELS = {
+    UPSCALE: "Upscaling",
+    FACE_RESTORE: "Face Restoration",
+    FACE_DETECT: "Face Restoration",
+    COLORIZE: "Photo Colorization",
+}
+
+StateDict = dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -41,6 +59,13 @@ class ModelSpec:
     # Key inside the checkpoint dict holding the weights (None = try common keys).
     state_key: str | None = None
     tags: tuple[str, ...] = ()
+    kind: str = UPSCALE
+    version: str = ""
+    # Rewrites a checkpoint's weights for ``build()`` (e.g. folds spectral norm).
+    convert: Callable[[StateDict], StateDict] | None = None
+    # Extra harmless globals the checkpoint pickles (e.g. ``slice``), allowed
+    # while still loading with ``weights_only=True``.
+    safe_globals: tuple[Any, ...] = ()
 
     @property
     def size_mb(self) -> float:
@@ -72,6 +97,10 @@ def register_family(family: ModelFamily) -> ModelFamily:
 
 def all_specs() -> list[ModelSpec]:
     return list(_SPECS.values())
+
+
+def specs_of_kind(kind: str) -> list[ModelSpec]:
+    return [s for s in _SPECS.values() if s.kind == kind]
 
 
 def all_families() -> list[ModelFamily]:

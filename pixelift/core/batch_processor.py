@@ -16,6 +16,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pixelift.core.control import JobControl
 from pixelift.core.errors import CancelledError, UpscalerError, friendly_error
@@ -27,6 +28,9 @@ from pixelift.core.image_processor import (
 )
 from pixelift.core.upscaler import Upscaler
 from pixelift.utils.image_utils import probe_image
+
+if TYPE_CHECKING:
+    from pixelift.core.restoration.pipeline import Restorer
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +110,11 @@ Listener = Callable[[BatchEvent], None]
 
 
 class BatchProcessor:
-    """Runs ``process_image`` over a list of items with ``workers`` threads."""
+    """Runs ``process_image`` over a list of items with ``workers`` threads.
+
+    Upscaling and restoration batches work the same way; a restoration batch
+    shares one :class:`Restorer` (and so one set of loaded models).
+    """
 
     def __init__(
         self,
@@ -131,6 +139,12 @@ class BatchProcessor:
         self._claims: dict[Path, Path] = {}  # output -> source, guarded by _lock
         self._planned = False  # guarded by _lock
         self.summary: BatchSummary | None = None
+        # One restoration engine for the whole batch: AI models load once.
+        self.restorer: Restorer | None = None
+        if options.restoration is not None:
+            from pixelift.core.restoration.pipeline import Restorer
+
+            self.restorer = Restorer(upscaler)
 
     # --- control -----------------------------------------------------------
     @property
@@ -242,6 +256,7 @@ class BatchProcessor:
                 on_progress,
                 self.control,
                 claim=lambda output: self._claim(output, item.path),
+                restorer=self.restorer,
             )
             item.result = result
             item.status = ItemStatus.SKIPPED if result.skipped else ItemStatus.DONE

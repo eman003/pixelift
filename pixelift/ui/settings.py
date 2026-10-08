@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from pixelift.core import device_manager as dm
-from pixelift.models import all_families
+from pixelift.models import KIND_LABELS, UPSCALE, all_families
 from pixelift.ui.widgets.model_row import ModelRow
 from pixelift.utils import system
 from pixelift.utils.image_utils import render_filename
@@ -160,7 +160,10 @@ class PreferencesDialog(Adw.PreferencesDialog):
         group.add(self.folder_row)
 
         self.template_row = Adw.EntryRow(
-            title="Filename template", text=self.settings.filename_template
+            title="Filename template (upscaling)", text=self.settings.filename_template
+        )
+        self.template_row.set_tooltip_text(
+            "Restored photos are named <name>_restored[_colorized][_2x].<ext>"
         )
         self.template_row.connect("changed", self._on_template_changed)
         group.add(self.template_row)
@@ -201,7 +204,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
     def _update_folder_row(self) -> None:
         folder = self.settings.output_dir
-        self.folder_row.set_subtitle(folder or "Next to each original, in an “upscaled” folder")
+        self.folder_row.set_subtitle(
+            folder or "Next to each original, in an “upscaled” (or “restored”) folder"
+        )
         self.folder_reset.set_visible(bool(folder))
 
     def _choose_folder(self) -> None:
@@ -301,15 +306,28 @@ class PreferencesDialog(Adw.PreferencesDialog):
     def _build_models(self) -> None:
         page = self._page("models", "Models", "folder-download-symbolic")
         manager = self.app.model_manager
-        group = Adw.PreferencesGroup(
-            title="AI Models",
-            description="Models are downloaded once from the official Real-ESRGAN releases on "
-            "GitHub and verified with SHA-256 checksums. Images are always "
-            "processed locally — your images stay on your computer.",
-        )
-        page.add(group)
-        for spec in manager.specs():
-            group.add(ModelRow(spec, self.app.downloads))
+        descriptions = {
+            "Upscaling": "Models are downloaded once from the projects' official releases and "
+            "verified with SHA-256 checksums. Images are always processed locally — your "
+            "images stay on your computer.",
+            "Face Restoration": "Used by Restore Photos to restore faces: GFPGAN restores, "
+            "RetinaFace finds the faces. Both are needed.",
+            "Photo Colorization": "Used by Restore Photos to colorize black-and-white "
+            "photographs, only when you ask for it.",
+        }
+        specs = manager.specs()
+        for label in dict.fromkeys(KIND_LABELS.values()):
+            group_specs = [
+                s for s in specs if KIND_LABELS.get(s.kind, KIND_LABELS[UPSCALE]) == label
+            ]
+            if not group_specs:
+                continue
+            group = Adw.PreferencesGroup(
+                title=f"{label} Models", description=descriptions.get(label, "")
+            )
+            page.add(group)
+            for spec in group_specs:
+                group.add(ModelRow(spec, self.app.downloads))
 
         folder_group = Adw.PreferencesGroup()
         page.add(folder_group)

@@ -6,7 +6,7 @@ from collections.abc import Callable
 
 from gi.repository import Adw, Gtk
 
-from pixelift.models import ModelSpec
+from pixelift.models import UPSCALE, ModelSpec
 from pixelift.ui.downloads import DownloadState, DownloadTracker
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.utils.image_utils import human_size
@@ -20,10 +20,13 @@ class ModelRow(Adw.ActionRow):
         self.spec = spec
         self.tracker = tracker
         self.allow_remove = allow_remove
-        self.set_subtitle(
-            f"{spec.description}\n{human_size(spec.size_bytes)} · {spec.native_scale}× · "
-            f"{spec.license}"
-        )
+        facts = [human_size(spec.size_bytes)]
+        if spec.version:
+            facts.insert(0, spec.version)
+        if spec.kind == UPSCALE:
+            facts.append(f"{spec.native_scale}×")
+        facts.append(spec.license)
+        self.set_subtitle(f"{spec.description}\n{' · '.join(facts)}")
         self.set_subtitle_lines(3)
 
         self.status_icon = Gtk.Image(icon_name="object-select-symbolic", tooltip_text="Installed")

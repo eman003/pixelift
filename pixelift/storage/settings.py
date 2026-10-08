@@ -13,6 +13,7 @@ from typing import Any
 
 from pixelift.core import lighting
 from pixelift.core.image_processor import ProcessingOptions
+from pixelift.core.restoration import settings as rs
 from pixelift.storage import paths
 from pixelift.utils.image_utils import DEFAULT_TEMPLATE, OUTPUT_FORMATS
 
@@ -21,6 +22,8 @@ log = logging.getLogger(__name__)
 TILE_SIZES = (0, 256, 512, 1024)  # 0 = automatic
 THEMES = ("system", "light", "dark")
 EXISTING = ("skip", "overwrite", "rename")
+MODES = ("upscale", "restore")
+_STANDARD = rs.LEVEL_STAGES[rs.STANDARD]
 
 
 @dataclass
@@ -50,6 +53,30 @@ class Settings:
     lighting_temperature: int = 0
     lighting_tint: int = 0
     lighting_saturation: int = 0
+    # Photo restoration (mode "restore"). The restore_<stage> values are the
+    # Custom level's stages; restore_<color> the manual colour correction.
+    mode: str = "upscale"  # upscale | restore
+    restore_preset: str = rs.PRESET_RESTORE
+    restore_level: str = rs.STANDARD
+    restore_dust: int = _STANDARD.dust
+    restore_scratches: int = _STANDARD.scratches
+    restore_noise: int = _STANDARD.noise
+    restore_fading: int = _STANDARD.fading
+    restore_sharpness: int = _STANDARD.sharpness
+    restore_face: str = _STANDARD.face
+    restore_auto_color: bool = _STANDARD.auto_color
+    restore_detail: bool = _STANDARD.detail
+    restore_fidelity: int = rs.DEFAULT_FIDELITY
+    restore_temperature: int = 0
+    restore_tint: int = 0
+    restore_exposure: int = 0
+    restore_contrast: int = 0
+    restore_saturation: int = 0
+    restore_colorize_strength: int = rs.DEFAULT_COLORIZE_STRENGTH
+    restore_colorize_vivid: int = 0
+    restore_preserve_tones: bool = True
+    restore_modern: str = rs.DEFAULT_MODERN
+    restore_scale: int = 2  # used by the "+ Upscale" presets
     # Performance
     concurrent_jobs: int = 0  # 0 = automatic
     cpu_threads: int = 0  # 0 = all cores
@@ -82,7 +109,61 @@ class Settings:
         for name in lighting.ADJUSTMENT_NAMES:
             key = f"lighting_{name}"
             setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
+        self._normalise_restoration(default)
         return self
+
+    def _normalise_restoration(self, default: Settings) -> None:
+        if self.mode not in MODES:
+            self.mode = default.mode
+        if self.restore_preset not in rs.PRESETS:
+            self.restore_preset = default.restore_preset
+        if self.restore_level not in rs.LEVELS:
+            self.restore_level = default.restore_level
+        if self.restore_face not in rs.FACE_MODES:
+            self.restore_face = default.restore_face
+        if self.restore_modern not in rs.MODERN_MODES:
+            self.restore_modern = default.restore_modern
+        if self.restore_scale not in (2, 4):
+            self.restore_scale = default.restore_scale
+        for name in (*rs.STAGE_SLIDERS, "fidelity", "colorize_strength", "colorize_vivid"):
+            key = f"restore_{name}"
+            setattr(self, key, min(100, max(0, int(getattr(self, key)))))
+        for name in rs.COLOR_SLIDERS:
+            key = f"restore_{name}"
+            setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
+
+    def restoration_stages(self) -> rs.Stages:
+        """The Custom level's stages."""
+        return rs.Stages(
+            *(getattr(self, f"restore_{name}") for name in rs.STAGE_SLIDERS),
+            face=self.restore_face,
+            auto_color=self.restore_auto_color,
+            detail=self.restore_detail,
+        )
+
+    def set_restoration_stages(self, stages: rs.Stages) -> None:
+        for name in rs.STAGE_SLIDERS:
+            setattr(self, f"restore_{name}", getattr(stages, name))
+        self.restore_face = stages.face
+        self.restore_auto_color = stages.auto_color
+        self.restore_detail = stages.detail
+
+    def restoration(self) -> rs.RestorationSettings:
+        colorize, upscale = rs.preset_flags(self.restore_preset)
+        return rs.RestorationSettings(
+            level=self.restore_level,
+            custom=self.restoration_stages(),
+            fidelity=self.restore_fidelity,
+            color=lighting.Adjustments(
+                **{name: getattr(self, f"restore_{name}") for name in rs.COLOR_SLIDERS}
+            ),
+            colorize=colorize,
+            colorize_strength=self.restore_colorize_strength,
+            colorize_vivid=self.restore_colorize_vivid,
+            preserve_tones=self.restore_preserve_tones,
+            modern=self.restore_modern,
+            scale=self.restore_scale if upscale else 1,
+        )
 
     def lighting(self) -> lighting.LightingSettings:
         custom = lighting.Adjustments(
@@ -101,6 +182,7 @@ class Settings:
             existing=self.existing,  # type: ignore[arg-type]
             preserve_metadata=self.preserve_metadata,
             lighting=self.lighting(),
+            restoration=self.restoration() if self.mode == "restore" else None,
         )
 
 

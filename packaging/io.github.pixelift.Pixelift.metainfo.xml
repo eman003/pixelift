@@ -6,14 +6,17 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <description>
-    <p>Upscale photos and illustrations 2× or 4× with Real-ESRGAN super-resolution.
-      All processing happens on your computer: your images are never uploaded.</p>
+    <p>Upscale photos and illustrations 2× or 4× with Real-ESRGAN super-resolution,
+      and restore old photographs. All processing happens on your computer: your
+      images are never uploaded.</p>
     <ul>
       <li>Batch processing with pause, resume, cancel and retry</li>
       <li>Before/after comparison with zoom and pan</li>
       <li>NVIDIA CUDA, AMD ROCm and Intel XPU acceleration with automatic CPU fallback</li>
       <li>Tiled processing for very large images</li>
       <li>Lighting profiles with a live preview</li>
+      <li>AI photo restoration: dust, scratches, fading, colour casts and faces, with
+        optional colorization of black-and-white photos</li>
       <li>Keeps transparency, colour profiles and EXIF metadata</li>
     </ul>
   </description>
@@ -21,6 +24,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.0" date="2026-10-08">
+      <description>
+        <p>AI Photo Restoration: repair dust, scratches, noise and fading, correct
+          yellowing and colour casts, restore faces while keeping the person's identity,
+          and optionally colorize black-and-white photos — all locally.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-10-08">
       <description>
         <p>Lighting profiles: adjust exposure, contrast, colour and more before upscaling, with a live preview.</p>

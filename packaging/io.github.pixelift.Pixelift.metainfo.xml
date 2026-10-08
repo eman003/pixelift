@@ -26,6 +26,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.5.0" date="2026-10-08">
+      <description>
+        <p>A polished startup screen: the Pixelift logo eases in with a soft glow and a
+          quiet status line, then dissolves into the workspace — sooner than before and
+          without delaying startup.</p>
+      </description>
+    </release>
     <release version="1.4.0" date="2026-10-08">
       <description>
         <p>A redesigned window built around your photo: a large workspace with the lighting

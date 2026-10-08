@@ -72,7 +72,8 @@ class UpscalerApplication(Adw.Application):
         if not self.settings.first_run_complete:
             from pixelift.ui.first_run import FirstRunDialog
 
-            FirstRunDialog(self).present(window)
+            # Over the workspace, not the startup screen.
+            window.when_ready(lambda: FirstRunDialog(self).present(window))
 
     def do_open(self, files: list[Gio.File], _n_files: int, _hint: str) -> None:
         self.activate()

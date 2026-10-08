@@ -332,3 +332,42 @@ def test_saved_look_opens_at_full_strength_and_refreshes_its_card():
     controls.select("user:Punchy")
     assert app.settings.camera_look_intensity == 100
     controls.shutdown()
+
+
+def test_startup_logo_timeline():
+    from pixelift.ui.startup import INTRO_MS, LOGO_SETTLED_MS, LogoMark
+
+    logo = LogoMark()
+    logo.time_ms = 0
+    assert logo.entrance() == 0 and logo.glow() == 0 and logo.sweep() is None
+    logo.time_ms = LOGO_SETTLED_MS
+    assert logo.entrance() == 1  # fully in: the screen may give way
+    logo.time_ms = 850
+    assert logo.glow() == 1 and 0 < logo.sweep() < 1  # glow peak, sweep crossing
+    logo.time_ms = INTRO_MS
+    assert logo.sweep() is None  # the sweep runs once
+    assert 0.45 < logo.glow() < 0.75  # settled into the slow ambient pulse
+
+
+def test_startup_screen_states():
+    from pixelift.ui.startup import STATUS_STARTING, StartupScreen
+
+    retried, exited = [], []
+    screen = StartupScreen(lambda: retried.append(1), lambda: exited.append(1))
+    assert screen.status.get_label() == STATUS_STARTING and not screen.error_box.get_visible()
+    settled = []
+    screen.when_settled(lambda: settled.append(1))
+    assert not settled  # not mapped yet: the logo has not come in
+    screen._settle()
+    screen.when_settled(lambda: settled.append(2))
+    assert settled == [1, 2]
+
+    screen.show_error("Traceback: boom")
+    assert screen.error_box.get_visible() and not screen.dots.get_visible()
+    assert screen.title.get_label() == "Unable to start Pixelift"
+    assert "boom" in screen.details.get_label()  # technical details, folded away
+    screen.retry_btn.emit("clicked")
+    assert retried == [1]
+    screen.show_starting()
+    assert screen.status.get_visible() and not screen.error_box.get_visible()
+    screen.stop()

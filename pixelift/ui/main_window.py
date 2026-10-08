@@ -15,7 +15,8 @@ Both modes share the queue, the worker and the output options.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+import traceback
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,7 @@ from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
 from pixelift.ui.async_utils import idle, run_in_thread
 from pixelift.ui.image_queue import QueueRow, ThumbnailLoader
+from pixelift.ui.startup import STATUS_DEVICE, STATUS_READY, StartupScreen
 from pixelift.ui.widgets.camera_looks import GRAIN_LABELS, CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
 from pixelift.ui.widgets.lighting import LightingControls
@@ -59,6 +61,8 @@ log = logging.getLogger(__name__)
 
 SCALES = (2, 4)
 LOOK_SAMPLE_SIZE = 400  # the camera look cards' sample photo (px, longest side)
+STARTUP_FADE_MS = 400  # the startup screen dissolving into the workspace
+MAX_DEVICE_WAIT_MS = 1500  # after which the workspace shows; detection finishes later
 STAGE_SIZE = 1600  # the workspace preview (px, longest side); Compare shows full detail
 FORMATS = (("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WebP"))
 TABS = (
@@ -94,7 +98,128 @@ class MainWindow(Adw.ApplicationWindow):
         self._stage_shown_look: tuple | None = None  # what the look texture renders
         self._stage_busy = False
         self._stage_generation = 0
+        # Startup: the startup screen shows at once; the workspace is built
+        # right after its first frame, then the screen dissolves into it.
+        self.ready = False
+        self._built = False
+        self._building: Iterator[None] | None = None
+        self._devices_known = False
+        self._device_wait_over = False
+        self._pending_paths: list[Path] = []
+        self._ready_callbacks: list[Callable[[], None]] = []
 
+        self.startup = StartupScreen(on_retry=self._retry_startup, on_exit=self._exit_startup)
+        self.root = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.CROSSFADE,
+            transition_duration=STARTUP_FADE_MS,
+            hhomogeneous=False,  # the hidden workspace is not measured meanwhile
+            vhomogeneous=False,
+        )
+        self.root.add_named(self.startup, "startup")
+        self.set_content(self.root)
+        self.connect("close-request", self._on_close_request)
+        self.startup.connect("map", lambda _w: self._after_next_frame(self._build_ui))
+        app.when_devices_ready(self._on_startup_devices)
+        self.startup.when_settled(self._maybe_finish_startup)
+
+    # --- startup -----------------------------------------------------------
+    def _after_next_frame(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` once the window has painted its next frame."""
+        clock = self.get_frame_clock()
+        if clock is None:
+            GLib.idle_add(lambda: callback() and False)
+            return
+        handler = 0
+
+        def painted(_clock: Gdk.FrameClock) -> None:
+            clock.disconnect(handler)
+            GLib.idle_add(lambda: callback() and False)
+
+        handler = clock.connect("after-paint", painted)
+        self.startup.queue_draw()
+
+    def _build_ui(self) -> None:
+        if self._built or self._building is not None:
+            return
+        self._building = self._workspace_steps()
+        self._build_step()
+
+    def _build_step(self) -> None:
+        steps = self._building
+        if steps is None:
+            return
+        try:
+            next(steps)
+        except StopIteration:
+            self._building = None
+            self._on_built()
+        except Exception:  # shown on the startup screen, logged in full
+            log.exception("Could not build the main window")
+            self._building = None
+            self.startup.show_error(traceback.format_exc())
+        else:
+            self._after_next_frame(self._build_step)
+
+    def _on_built(self) -> None:
+        self._built = True
+        if not self._devices_known:
+            self.startup.set_status(STATUS_DEVICE)
+            # Device detection runs in the background; never hold the window for it long.
+            GLib.timeout_add(MAX_DEVICE_WAIT_MS, self._device_wait_elapsed)
+        self._maybe_finish_startup()
+
+    def _on_startup_devices(self, _report: dm.DeviceReport) -> None:
+        self._devices_known = True
+        self._maybe_finish_startup()
+
+    def _device_wait_elapsed(self) -> bool:
+        self._device_wait_over = True
+        self._maybe_finish_startup()
+        return GLib.SOURCE_REMOVE
+
+    def _maybe_finish_startup(self) -> None:
+        """Show the workspace once it is built, the device is known (or the wait
+        is over) and the logo has settled — whichever comes last."""
+        if self.ready or not self._built or not self.startup.logo_settled:
+            return
+        if not (self._devices_known or self._device_wait_over):
+            return
+        self.ready = True
+        self.startup.set_status(STATUS_READY)
+        self.root.set_visible_child_name("app")
+        self.set_focus(None)
+
+        def finished() -> bool:
+            self.startup.stop()
+            self.root.remove(self.startup)
+            return GLib.SOURCE_REMOVE
+
+        GLib.timeout_add(STARTUP_FADE_MS + 100, finished)
+        callbacks, self._ready_callbacks = self._ready_callbacks, []
+        for callback in callbacks:
+            callback()
+        paths, self._pending_paths = self._pending_paths, []
+        if paths:
+            self.add_paths(paths)
+
+    def when_ready(self, callback: Callable[[], None]) -> None:
+        """Run ``callback`` once the workspace is shown (e.g. the setup assistant)."""
+        if self.ready:
+            callback()
+        else:
+            self._ready_callbacks.append(callback)
+
+    def _retry_startup(self) -> None:
+        self.startup.show_starting()
+        self._after_next_frame(self._build_ui)
+
+    def _exit_startup(self) -> None:
+        self.app.quit()
+
+    def _workspace_steps(self) -> Iterator[None]:
+        """Build the workspace in steps; a frame is drawn between them, so the
+        startup animation keeps moving (the look gallery alone takes ~0.1 s)."""
+        app = self.app
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(self._build_header())
         self.toasts = Adw.ToastOverlay()
@@ -104,9 +229,16 @@ class MainWindow(Adw.ApplicationWindow):
         self.toasts.set_child(self.stack)
         self.toasts.add_css_class("drop-zone")
         toolbar.set_content(self.toasts)
+        yield
+        self.lighting = LightingControls(app)
+        yield
+        self.camera_look = CameraLookControls(app)
+        yield
         toolbar.add_bottom_bar(self._build_controls())
         toolbar.set_bottom_bar_style(Adw.ToolbarStyle.RAISED)
-        self.set_content(toolbar)
+        if self.root.get_child_by_name("app") is not None:
+            self.root.remove(self.root.get_child_by_name("app"))  # a failed attempt
+        self.root.add_named(toolbar, "app")
 
         drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
         drop.connect("drop", self._on_drop)
@@ -137,7 +269,6 @@ class MainWindow(Adw.ApplicationWindow):
         self.add_breakpoint(medium)
         self.add_breakpoint(narrow)
 
-        self.connect("close-request", self._on_close_request)
         app.on_settings_changed(self._sync_from_settings)
         app.on_lighting_changed(self._reset_stale)
         app.on_lighting_changed(self._on_look_changed)
@@ -450,9 +581,6 @@ class MainWindow(Adw.ApplicationWindow):
             self._labeled("Format", self._segment_box(self.format_buttons), False)
         )
         self.export_box.append(self._labeled("Output", output_row))
-
-        self.lighting = LightingControls(self.app)
-        self.camera_look = CameraLookControls(self.app)
 
         self.panel_stack = Gtk.Stack(
             transition_type=Gtk.StackTransitionType.CROSSFADE,
@@ -994,6 +1122,9 @@ class MainWindow(Adw.ApplicationWindow):
         return bool(paths)
 
     def add_paths(self, paths: list[Path]) -> None:
+        if not self.ready:
+            self._pending_paths.extend(paths)  # opened with files: added once shown
+            return
         existing = {row.item.path.resolve() for row in self.rows}
         images = [p for p in collect_images(paths) if p.resolve() not in existing]
         for path in images:

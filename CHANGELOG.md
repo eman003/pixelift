@@ -4,6 +4,21 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] - 2026-10-08
+
+### Added
+
+- **Startup screen.** Pixelift's logo eases in with a soft brand glow and a
+  single light sweep, with a short status line ("Checking processing device")
+  and three quiet loading dots, then dissolves into the workspace. It appears
+  sooner than the window used to (the workspace is built behind it, in steps,
+  so the animation keeps moving) and never holds Pixelift back: the workspace
+  shows as soon as it is built and the logo has settled, waiting at most
+  1.5 s for processing-device detection (which then finishes in the
+  background). If the window cannot be built, a clean error with Try Again /
+  Exit replaces the animation (details folded away). With animations turned
+  off (reduced motion) the screen is static.
+
 ## [1.4.0] - 2026-10-08
 
 ### Changed

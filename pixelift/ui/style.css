@@ -216,3 +216,25 @@
   border-radius: 6px;
   background-color: alpha(currentColor, 0.06);
 }
+
+/* --- Startup screen -------------------------------------------------------- */
+.startup-screen {
+  background-color: @window_bg_color;
+}
+
+.startup-title {
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+
+.startup-status {
+  font-size: 0.95em;
+}
+
+.startup-dots {
+  color: @accent_color;
+}
+
+.startup-details label {
+  padding: 10px 12px;
+}

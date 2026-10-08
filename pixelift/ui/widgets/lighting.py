@@ -1,7 +1,7 @@
 """Lighting controls (profile, intensity, Custom adjustments) bound to the settings.
 
-Used by the main window's control panel and by the preview window; both stay
-in sync through the application's settings-changed listeners.
+Used by the main window's control panel; it stays in sync through the
+application's settings-changed listeners.
 """
 
 from __future__ import annotations

@@ -61,8 +61,10 @@
   background-color: mix(@window_bg_color, black, 0.08);
 }
 
-.stage-picture {
-  margin: 28px 28px 64px 28px;
+/* The photo canvas: keyboard focus shows as a soft inner ring. */
+.compare-view:focus-visible {
+  outline: 2px solid alpha(@accent_color, 0.5);
+  outline-offset: -2px;
 }
 
 .stage-chip {
@@ -191,16 +193,7 @@
   font-weight: 700;
 }
 
-/* --- Compare window and look gallery --------------------------------------- */
-.compare-view {
-  background-color: #1e1e1e;
-}
-
-.osd-pill {
-  border-radius: 999px;
-  padding: 2px 10px;
-}
-
+/* --- Look gallery ---------------------------------------------------------- */
 .look-card {
   padding: 4px;
   border-radius: 10px;

@@ -26,6 +26,13 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.7.0" date="2026-10-08">
+      <description>
+        <p>Compare on the photo: the before/after divider, zoom and pan now work right on
+          the workspace — no separate preview window. Preview Restoration is on the stage
+          too.</p>
+      </description>
+    </release>
     <release version="1.6.0" date="2026-10-08">
       <description>
         <p>Presets: one-click recipes — Natural, Portrait, Landscape, Cinematic, Film,

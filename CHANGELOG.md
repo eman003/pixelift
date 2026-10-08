@@ -4,6 +4,25 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.0] - 2026-10-08
+
+### Changed
+
+- **Compare on the stage**: the before/after comparison, zoom and pan moved
+  from the separate preview window onto the workspace photo. **Compare** (or
+  **C**, or double-clicking a photo) shows a divider to drag (or move with
+  ←/→); scroll, pinch or double-click to zoom, drag to pan. Zoomed in, the
+  visible part is decoded at full resolution. A zoom chip appears only while
+  zoomed in and returns to fit.
+- **Preview Restoration** is on the stage in Restore Photos mode and compares
+  as *Original Scan* / *Restored · Preview*.
+
+### Removed
+
+- The separate preview window (its lighting and look controls duplicated the
+  dock), the stage's **Original** toggle (Compare replaces it) and the compare
+  button on each photo in the list.
+
 ## [1.6.0] - 2026-10-08
 
 ### Added

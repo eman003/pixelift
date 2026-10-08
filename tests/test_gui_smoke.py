@@ -46,7 +46,7 @@ def test_queue_row_states(tmp_path):
     from pixelift.utils.image_utils import make_thumbnail, probe_image
 
     path = make_image(tmp_path / "a.png")
-    row = QueueRow(QueueItem(path), *(lambda _r: None,) * 4)
+    row = QueueRow(QueueItem(path), *(lambda _r: None,) * 3)
     row.set_info(probe_image(path), make_thumbnail(path))
     assert row.ready
     assert "40×30" in row.details.get_label() and "160×120" in row.details.get_label()
@@ -205,7 +205,7 @@ def test_black_and_white_banner_and_row(tmp_path):
     assert choices == [False, True]
 
     path = make_image(tmp_path / "old.png", mode="L")
-    row = QueueRow(QueueItem(path), *(lambda _r: None,) * 4)
+    row = QueueRow(QueueItem(path), *(lambda _r: None,) * 3)
     row.set_info(probe_image(path), make_thumbnail(path), True)
     row.set_scale(1, show_monochrome=True)
     label = row.details.get_label()

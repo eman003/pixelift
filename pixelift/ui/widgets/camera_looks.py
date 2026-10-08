@@ -1,8 +1,8 @@
 """Camera look controls: a compact row plus a gallery of look cards.
 
 The row (look button, intensity, grain, favourite, reset) sits under the
-lighting controls in the main window and the preview window; both stay in
-sync through the application's lighting listeners. The gallery shows every
+lighting controls in the main window's Look tab; it stays in sync through the
+application's lighting listeners. The gallery shows every
 look as a card with a thumbnail rendered from the user's own photo (a
 synthetic sample until one is added), filtered by category or favourites.
 """

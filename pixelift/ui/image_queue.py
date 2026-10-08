@@ -74,7 +74,6 @@ class QueueRow(Gtk.ListBoxRow):
         item: QueueItem,
         on_remove: Callable[[QueueRow], None],
         on_retry: Callable[[QueueRow], None],
-        on_compare: Callable[[QueueRow], None],
         on_show_error: Callable[[QueueRow], None],
     ) -> None:
         super().__init__()
@@ -121,9 +120,6 @@ class QueueRow(Gtk.ListBoxRow):
         buttons = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
         self.error_btn = self._icon_button("dialog-warning-symbolic", "Show error", on_show_error)
         self.retry_btn = self._icon_button("view-refresh-symbolic", "Retry", on_retry)
-        self.compare_btn = self._icon_button(
-            "view-dual-symbolic", "Compare before / after", on_compare
-        )
         self.open_btn = self._icon_button(
             "folder-open-symbolic", "Show in folder", lambda _r: self.show_in_folder()
         )
@@ -131,7 +127,6 @@ class QueueRow(Gtk.ListBoxRow):
         for btn in (
             self.error_btn,
             self.retry_btn,
-            self.compare_btn,
             self.open_btn,
             self.remove_btn,
         ):
@@ -214,12 +209,6 @@ class QueueRow(Gtk.ListBoxRow):
         self.progress.set_visible(status is ItemStatus.PROCESSING)
         self.progress.set_fraction(item.progress)
         has_output = bool(item.result and item.result.output.exists())
-        self.compare_btn.set_visible(self.ready)
-        self.compare_btn.set_tooltip_text(
-            "Compare before / after" if has_output else "Preview original"
-        )
-        if has_output and item.result and item.result.restored:
-            self.compare_btn.set_tooltip_text("Compare original scan / restored photo")
         self.open_btn.set_visible(has_output)
         self.retry_btn.set_visible(
             status in (ItemStatus.FAILED, ItemStatus.CANCELLED) and self.load_error is None

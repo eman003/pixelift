@@ -14,6 +14,7 @@ Both modes share the queue, the worker and the output options.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import traceback
 from collections.abc import Callable, Iterator
@@ -34,13 +35,20 @@ from pixelift.core.batch_processor import (
     ItemStatus,
     QueueItem,
 )
-from pixelift.core.errors import ModelNotInstalledError, UpscalerError
+from pixelift.core.control import JobControl
+from pixelift.core.errors import (
+    CancelledError,
+    ModelNotInstalledError,
+    UpscalerError,
+    friendly_error,
+)
 from pixelift.core.image_processor import restoration_tag
 from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
 from pixelift.ui.async_utils import idle, run_in_thread
 from pixelift.ui.image_queue import QueueRow, ThumbnailLoader
+from pixelift.ui.preview import CompareView
 from pixelift.ui.startup import STATUS_DEVICE, STATUS_READY, StartupScreen
 from pixelift.ui.widgets.camera_looks import GRAIN_LABELS, CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
@@ -64,7 +72,7 @@ SCALES = (2, 4)
 LOOK_SAMPLE_SIZE = 400  # the camera look cards' sample photo (px, longest side)
 STARTUP_FADE_MS = 400  # the startup screen dissolving into the workspace
 MAX_DEVICE_WAIT_MS = 1500  # after which the workspace shows; detection finishes later
-STAGE_SIZE = 1600  # the workspace preview (px, longest side); Compare shows full detail
+STAGE_SIZE = 1600  # the stage's preview (px, longest side); zooming in loads full detail
 FORMATS = (("png", "PNG"), ("jpeg", "JPEG"), ("webp", "WebP"))
 TABS = (
     ("preset", "Preset", "One-click recipes: a starting point for your photo"),
@@ -93,13 +101,15 @@ class MainWindow(Adw.ApplicationWindow):
         # The stage: the selected photo (or its result), with the look previewed live.
         self._stage_row: QueueRow | None = None
         self._stage_source: Path | None = None  # the file the stage shows
-        self._stage_base: Image.Image | None = None
+        self._stage_base: Image.Image | None = None  # the original, for looks and restoring
         self._stage_is_output = False
-        self._stage_base_texture: Gdk.Texture | None = None
-        self._stage_look_texture: Gdk.Texture | None = None
-        self._stage_shown_look: tuple | None = None  # what the look texture renders
+        self._stage_shown_look: tuple | None = None  # what the after side renders
         self._stage_busy = False
         self._stage_generation = 0
+        # Restore mode: a reduced-size restoration on the after side.
+        self._restore_control: JobControl | None = None  # running
+        self._restore_shown = False
+        self._restore_stale = False  # settings changed since it was made
         # Startup: the startup screen shows at once; the workspace is built
         # right after its first frame, then the screen dissolves into it.
         self.ready = False
@@ -407,7 +417,7 @@ class MainWindow(Adw.ApplicationWindow):
             selection_mode=Gtk.SelectionMode.SINGLE, activate_on_single_click=False
         )
         self.listbox.add_css_class("navigation-sidebar")
-        self.listbox.connect("row-activated", lambda _l, row: self.open_preview(row))
+        self.listbox.connect("row-activated", lambda _l, row: self.compare_row(row))
         self.listbox.connect("row-selected", self._on_row_selected)
 
         header = Gtk.Box(spacing=6)
@@ -447,11 +457,11 @@ class MainWindow(Adw.ApplicationWindow):
         return sidebar
 
     def _build_stage(self) -> Gtk.Widget:
-        self.stage_picture = Gtk.Picture(
-            content_fit=Gtk.ContentFit.CONTAIN, can_shrink=True, hexpand=True, vexpand=True
-        )
-        self.stage_picture.add_css_class("stage-picture")
-        overlay = Gtk.Overlay(child=self.stage_picture)
+        # The fitted photo keeps clear of the chips (top, right, bottom, left).
+        self.stage_view = CompareView(padding=(28, 28, 64, 28))
+        self.stage_view.connect("view-changed", lambda _v: self._update_zoom_chip())
+        self.stage_view.connect("notify::comparing", lambda *_: self._update_stage_overlays())
+        overlay = Gtk.Overlay(child=self.stage_view)
 
         self.stage_spinner = Gtk.Spinner(
             halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER, width_request=32, height_request=32
@@ -477,23 +487,39 @@ class MainWindow(Adw.ApplicationWindow):
         tools = Gtk.Box(spacing=2, valign=Gtk.Align.CENTER)
         tools.add_css_class("stage-chip")
         tools.add_css_class("stage-tools")
-        self.original_btn = Gtk.ToggleButton(
-            label="Original", tooltip_text="Show the original without the look"
+        # Contextual: each shows only when it applies (zoom only when zoomed in).
+        self.zoom_chip = Gtk.Button(tooltip_text="Fit to Window (0)")
+        self.zoom_chip.add_css_class("numeric")
+        self.zoom_chip.connect("clicked", lambda _b: self.stage_view.set_zoom(None))
+        self.compare_btn = Gtk.ToggleButton(
+            label="Compare",
+            tooltip_text="Compare Before / After (C) — drag the divider; "
+            "scroll to zoom, double-click for 100 %",
         )
-        self.original_btn.connect("toggled", lambda _b: self._show_stage_texture())
-        self.stage_compare_btn = Gtk.Button(
-            icon_name="view-dual-symbolic", tooltip_text="Compare and Zoom"
+        self.compare_btn.bind_property(
+            "active",
+            self.stage_view,
+            "comparing",
+            GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.BIDIRECTIONAL,
         )
-        self.stage_compare_btn.connect(
-            "clicked", lambda _b: self._stage_row and self.open_preview(self._stage_row)
+        self.restore_preview_btn = Gtk.Button(
+            label="Preview Restoration",
+            tooltip_text="Restore a reduced-size copy with the current settings",
         )
+        self.restore_preview_btn.connect("clicked", lambda _b: self._preview_restoration())
         self.stage_folder_btn = Gtk.Button(
             icon_name="folder-open-symbolic", tooltip_text="Show in Folder"
         )
+        self.stage_folder_btn.update_property([Gtk.AccessibleProperty.LABEL], ["Show in Folder"])
         self.stage_folder_btn.connect(
             "clicked", lambda _b: self._stage_row and self._stage_row.show_in_folder()
         )
-        for button in (self.original_btn, self.stage_compare_btn, self.stage_folder_btn):
+        for button in (
+            self.zoom_chip,
+            self.restore_preview_btn,
+            self.compare_btn,
+            self.stage_folder_btn,
+        ):
             button.add_css_class("flat")
             tools.append(button)
         self.stage_tools = tools
@@ -872,6 +898,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_look_changed(self) -> None:
         self._update_tab_values()
+        if self._restore_shown:
+            self._restore_stale = True  # offer to update the restoration preview
         self._refresh_stage()
 
     def _on_scale_selected(self, index: int) -> None:
@@ -956,38 +984,63 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _refresh_stage(self) -> None:
         """Show the selected photo: its result once processed, otherwise the
-        original with the lighting and camera look previewed live."""
+        original with the lighting and camera look previewed live. The
+        original is the stage's "before" side either way."""
         row = self._stage_row
+        view = self.stage_view
+        if not self.restoring:
+            self._drop_restore_preview()
         if row is None or not row.ready:
             self._stage_source = None
-            self._stage_base = self._stage_base_texture = self._stage_look_texture = None
+            self._stage_base = None
             self._stage_generation += 1
-            self.stage_picture.set_paintable(None)
+            self._drop_restore_preview()
+            view.clear()
             self.stage_spinner.set_spinning(row is not None and row.load_error is None)
             for widget in (self.stage_badge, self.stage_info, self.stage_tools):
                 widget.set_visible(False)
             return
         target, is_output = self._stage_target(row)
-        self._update_stage_overlays()
         if target != self._stage_source:
             self._stage_source = target
-            self._stage_base = self._stage_base_texture = self._stage_look_texture = None
+            self._stage_base = None
             self._stage_shown_look = None
             self._stage_generation += 1
             generation = self._stage_generation
-            self.stage_picture.set_paintable(None)
+            self._drop_restore_preview()
+            view.clear()
             self.stage_spinner.set_spinning(True)
+            original = row.item.path
+
+            def load() -> tuple:
+                if not is_output:
+                    return (*load_preview(original, STAGE_SIZE), None, None)
+                after, after_size = load_preview(target, STAGE_SIZE)
+                try:
+                    before, before_size = load_preview(original, STAGE_SIZE)
+                except (UpscalerError, OSError) as exc:  # moved or deleted: the result alone
+                    log.info("No original to compare with: %s", exc)
+                    before = before_size = None
+                return before, before_size, after, after_size
 
             def done(result: tuple) -> None:
                 if generation != self._stage_generation:
                     return
-                image, _size = result
+                before, before_size, after, after_size = result
                 self.stage_spinner.set_spinning(False)
-                self._stage_base = image
                 self._stage_is_output = is_output
-                self._stage_base_texture = texture_from_pil(image)
-                self._stage_look_texture = None
-                self._stage_shown_look = None
+                if before is not None:
+                    view.before.path = original
+                    view.before.texture = texture_from_pil(before)
+                    view.before.source_size = before_size
+                if after is not None:
+                    view.after.path = target
+                    view.after.texture = texture_from_pil(after)
+                    view.after.source_size = after_size
+                    view.set_images(after_size)
+                else:
+                    self._stage_base = before
+                    view.set_images(before_size)
                 self._render_stage_look()
                 self._update_stage_overlays()
 
@@ -998,11 +1051,11 @@ class MainWindow(Adw.ApplicationWindow):
                     self.stage_badge.remove_css_class("finished")
                     log.warning("Stage preview failed: %s", exc)
 
-            run_in_thread(
-                load_preview, target, STAGE_SIZE, on_done=done, on_error=failed, name="stage"
-            )
+            run_in_thread(load, on_done=done, on_error=failed, name="stage")
+            self._update_stage_overlays()
             return
         self._render_stage_look()
+        self._update_stage_overlays()
 
     def _wanted_stage_look(self) -> tuple | None:
         """(lighting, look, output size) to preview on the stage; None: nothing."""
@@ -1018,39 +1071,58 @@ class MainWindow(Adw.ApplicationWindow):
         return adjustments, recipe, (row.info.width * scale, row.info.height * scale)
 
     def _render_stage_look(self) -> None:
+        """Bring the "after" side up to date with the lighting and camera look."""
         base = self._stage_base
-        if base is None:
-            return
+        if base is None or self._restore_shown or self._restore_control is not None:
+            return  # a result, or a restoration preview, is on the after side
+        view = self.stage_view
         wanted = self._wanted_stage_look()
-        if wanted is None or wanted == self._stage_shown_look:
-            if wanted is None:
-                self._stage_look_texture = None
-                self._stage_shown_look = None
-            self._show_stage_texture()
+        if wanted == self._stage_shown_look:
+            return
+        if wanted is None:
+            view.after.clear()
+            self._stage_shown_look = None
+            view.queue_draw()
+            self._update_stage_overlays()
             return
         if self._stage_busy:
-            # Picked up when the running render finishes; meanwhile a newly
-            # loaded photo shows without the look rather than not at all.
-            self._show_stage_texture()
-            return
+            return  # picked up when the running render finishes
         self._stage_busy = True
         adjustments, recipe, output = wanted
+        sw, sh = view.before.source_size
+
+        def transform(region: Image.Image, crop_scale: float) -> Image.Image:
+            """The look on a full-detail crop (zoomed in), framed as the whole photo."""
+            frame = (round(sw * crop_scale), round(sh * crop_scale))
+            return cl.apply_to_pil(region, recipe, adjustments, frame=frame, output=output)
+
+        def current() -> bool:
+            return base is self._stage_base and not (
+                self._restore_shown or self._restore_control is not None
+            )
 
         def done(img: Image.Image) -> None:
             self._stage_busy = False
-            if base is self._stage_base:
-                self._stage_look_texture = texture_from_pil(img)
+            if current():
+                after = view.after
+                after.texture = texture_from_pil(img)
+                after.path = view.before.path
+                after.source_size = view.before.source_size
+                after.transform = transform
                 self._stage_shown_look = wanted
+                view.invalidate_detail(after)
+                self._update_stage_overlays()
             self._render_stage_look()  # the settings or photo may have moved on
 
         def failed(exc: BaseException) -> None:
             self._stage_busy = False
             log.warning("Stage look preview failed: %s", exc)
-            if base is self._stage_base and self._wanted_stage_look() == wanted:
+            if current() and self._wanted_stage_look() == wanted:
                 # Nothing valid to show for these settings: the plain photo.
-                self._stage_look_texture = None
+                view.after.clear()
                 self._stage_shown_look = None
-                self._show_stage_texture()
+                view.queue_draw()
+                self._update_stage_overlays()
             else:
                 self._render_stage_look()  # moved on meanwhile: render that
 
@@ -1061,41 +1133,150 @@ class MainWindow(Adw.ApplicationWindow):
             name="stage-look",
         )
 
-    def _show_stage_texture(self) -> None:
-        looked = self._stage_look_texture is not None
-        original = looked and self.original_btn.get_active()
-        texture = self._stage_look_texture if looked and not original else self._stage_base_texture
-        self.stage_picture.set_paintable(texture)
+    # --- restoration preview on the stage --------------------------------
+    def _preview_restoration(self) -> None:
+        """Restore a reduced-size copy of the photo (no upscaling) with the
+        current settings and compare it with the original on the stage."""
+        base = self._stage_base
+        if base is None or self._restore_control is not None:
+            return
+        if self.running:
+            show_error(
+                self,
+                UpscalerError(
+                    "Photos are being processed right now.",
+                    ["Preview again when the batch has finished"],
+                    title="Preview unavailable.",
+                ),
+            )
+            return
+        try:
+            restorer, settings, options = self.preview_restorer()
+        except UpscalerError as err:
+            show_error(self, err)
+            return
+        import numpy as np
+
+        rgb = np.array(base.convert("RGB"))
+        quick = dataclasses.replace(settings, scale=1)  # preview without upscaling
+        lighting = options.lighting.adjustments()
+        look = options.camera_look.recipe()
+        sw, sh = self.stage_view.before.source_size
+        look_output = (sw * options.output_scale, sh * options.output_scale)
+        path = self._stage_source
+        control = JobControl()
+        self._restore_control = control
+        self.stage_spinner.set_spinning(True)
         self._update_stage_overlays()
 
+        def work() -> Image.Image:
+            from pixelift.core.restoration.analysis import detect_monochrome_file
+
+            mono = detect_monochrome_file(path)
+            control.check()
+            result = restorer.restore(
+                rgb,
+                quick,
+                model=options.model,
+                lighting=lighting,
+                look=look,
+                look_output=look_output,
+                mono=mono,
+                control=control,
+            )
+            return Image.fromarray(result.rgb).convert("RGBA")
+
+        def finish(img: Image.Image | None, exc: BaseException | None = None) -> None:
+            if self._restore_control is not control:
+                return  # dropped meanwhile: another photo, mode or a batch started
+            self._restore_control = None
+            self.stage_spinner.set_spinning(False)
+            if img is not None and not control.cancelled:
+                view = self.stage_view
+                after = view.after
+                after.clear()
+                after.texture = texture_from_pil(img)  # no full-resolution detail
+                after.source_size = view.before.source_size
+                self._restore_shown = True
+                self._restore_stale = False
+                self._stage_shown_look = None
+                view.comparing = True
+                view.queue_draw()
+            elif exc is not None and not isinstance(exc, CancelledError):
+                show_error(self, friendly_error(exc))
+            self._update_stage_overlays()
+
+        run_in_thread(work, on_done=finish, on_error=lambda e: finish(None, e), name="restore")
+
+    def _cancel_restore_preview(self) -> None:
+        """Stop a running restoration preview (a batch needs the models)."""
+        if self._restore_control is not None:
+            self._restore_control.cancel()
+            self._restore_control = None
+            self.stage_spinner.set_spinning(False)
+            self._update_stage_overlays()
+
+    def _drop_restore_preview(self) -> None:
+        """Forget the restoration preview: the live look takes the after side again."""
+        self._cancel_restore_preview()
+        if self._restore_shown:
+            self._restore_shown = self._restore_stale = False
+            self.stage_view.after.clear()
+            self._stage_shown_look = None
+            self.stage_view.queue_draw()
+            self._render_stage_look()
+
+    # --- stage overlays ----------------------------------------------------
     def _update_stage_overlays(self) -> None:
         row = self._stage_row
         if row is None or not row.ready:
             return
+        view = self.stage_view
         _target, is_output = self._stage_target(row)
-        looked = self._stage_look_texture is not None and not is_output
-        if is_output and row.item.result is not None:
-            badge = "Restored" if row.item.result.restored else "Upscaled"
-        elif looked and self.original_btn.get_active():
-            badge = "Original"
-        elif looked:
-            badge = "Live Preview"
+        result = row.item.result if is_output else None
+        has_after = view.after.texture is not None
+        if result is not None:
+            after_label = "Restored" if result.restored else "Upscaled"
+        elif self._restore_shown:
+            after_label = "Restored · Preview"
         else:
-            badge = "Original"
-        self.stage_badge.set_label(badge)
+            after_label = "Live Preview"
+        restored = self._restore_shown or bool(result and result.restored)
+        view.before_label = "Original Scan" if restored else "Original"
+        view.after_label = after_label
+        view.queue_draw()
+        self.stage_badge.set_label(after_label if has_after else "Original")
         if is_output:
             self.stage_badge.add_css_class("finished")
         else:
             self.stage_badge.remove_css_class("finished")
         self.stage_info.set_label(f"{row.item.path.name}   {row.details.get_label()}")
         self.stage_info.set_tooltip_text(str(row.item.path))
-        self.original_btn.set_visible(looked)
+
+        self.compare_btn.set_visible(view.can_compare)
         self.stage_folder_btn.set_visible(is_output)
-        self.stage_compare_btn.set_tooltip_text(
-            "Compare Before / After" if is_output else "Compare and Zoom"
-        )
-        for widget in (self.stage_badge, self.stage_info, self.stage_tools):
+        restore_btn = self.restore_preview_btn
+        restore_btn.set_visible(self.restoring and not is_output and self._stage_base is not None)
+        busy = self._restore_control is not None
+        restore_btn.set_sensitive(not busy and not self.running)
+        if busy:
+            restore_btn.set_label("Restoring…")
+        elif self._restore_shown and self._restore_stale:
+            restore_btn.set_label("Update Preview")
+        else:
+            restore_btn.set_label("Preview Restoration")
+        # Comparing, the divider labels both sides in place of the badge.
+        self.stage_badge.set_visible(not view.showing_split)
+        for widget in (self.stage_info, self.stage_tools):
             widget.set_visible(True)
+        self._update_zoom_chip()
+
+    def _update_zoom_chip(self) -> None:
+        view = self.stage_view
+        zoomed = view.zoom is not None
+        self.zoom_chip.set_visible(zoomed)
+        if zoomed:
+            self.zoom_chip.set_label(f"{view.effective_zoom() * view.get_scale_factor():.0%}")
 
     # --- adding / removing images -----------------------------------------
     def open_file_dialog(self) -> None:
@@ -1147,9 +1328,7 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_state()
 
     def _add_row(self, item: QueueItem) -> None:
-        row = QueueRow(
-            item, self.remove_row, self.retry_row, self.open_preview, self.show_row_error
-        )
+        row = QueueRow(item, self.remove_row, self.retry_row, self.show_row_error)
         row.set_scale(
             self.app.settings.processing_options().output_scale, show_monochrome=self.restoring
         )
@@ -1229,14 +1408,15 @@ class MainWindow(Adw.ApplicationWindow):
         if row.item.error:
             show_error(self, row.item.error)
 
-    def open_preview(self, row: QueueRow) -> None:
+    def compare_row(self, row: QueueRow) -> None:
+        """Double-clicked photo: put it on the stage, comparing before / after."""
         if not row.ready:
             if row.item.error:
                 show_error(self, row.item.error)
             return
-        from pixelift.ui.preview import PreviewWindow
-
-        PreviewWindow(self, row.item, row.info).present()
+        self.listbox.select_row(row)
+        self.stage_view.comparing = True
+        self.stage_view.grab_focus()
 
     # --- processing --------------------------------------------------------
     @property
@@ -1578,13 +1758,9 @@ class MainWindow(Adw.ApplicationWindow):
         self.clear_btn.set_sensitive(count > 0 and not running)
         self.panel_stack.set_sensitive(not running)
         self.mode_box.set_sensitive(not running)
-        from pixelift.ui.preview import PreviewWindow
-
-        for window in self.app.get_windows():
-            if isinstance(window, PreviewWindow):
-                window.set_lighting_editable(not running)
-                if running:
-                    window.cancel_restoration()  # the batch needs the models and device
+        if running:
+            self._cancel_restore_preview()  # the batch needs the models and device
+        self._update_stage_overlays()
         self.progress_revealer.set_reveal_child(self.processor is not None)
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
@@ -1616,8 +1792,6 @@ def _without_models(
     restoration: rs.RestorationSettings, ids: frozenset[str]
 ) -> rs.RestorationSettings:
     """``restoration`` with the stages that need the models ``ids`` turned off."""
-    import dataclasses
-
     from pixelift.models.restoration import COLORIZE_MODELS, FACE_MODELS
 
     if ids & set(FACE_MODELS) and restoration.stages().face != rs.FACE_OFF:

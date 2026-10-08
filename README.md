@@ -182,14 +182,15 @@ sidebar (**F9** shows or hides it) — and the dock at the bottom.
    [Camera Looks](#camera-looks)) and **Export** (format and output folder).
    Click a tab to open its controls; click it again (or press **Esc**) to fold
    them away. The lighting and look are previewed live on the photo in the
-   workspace — **Original** shows it without them.
+   workspace — **Compare** splits it into before and after.
 3. Click **Upscale** (it shows how many photos are waiting). Use **Pause**,
    **Resume**, **Cancel** and **Retry Failed** as needed. Images whose result
    already exists are skipped. A finished photo shows its result on the stage.
-4. Click the compare button on the stage (or double-click a photo in the
-   sidebar) to open the before/after view: drag the divider, scroll to zoom,
-   drag to pan, **Space** toggles before/after, **1** = 100 %, **0** = fit,
-   **+/−** zoom.
+4. Compare and zoom right on the stage: **Compare** (or **C**, or
+   double-clicking a photo in the sidebar) shows a before/after divider — drag
+   it, or use **←/→**. Scroll or pinch to zoom, drag to pan, double-click for
+   100 % and back; **1** = 100 %, **0** = fit, **+/−** zoom. Zoomed in, the
+   visible part is shown at full resolution.
 
 Results go to `<original folder>/upscaled/` by default, named with the template
 `{name}_{scale}x` (e.g. `photo.jpg → photo_4x.png`). Template fields: `{name}`,
@@ -217,8 +218,8 @@ the tab shows *Natural · Modified*; **Reset to Natural** brings the preset back
 
 Lighting profiles adjust tone and colour **before** the AI model runs, so the
 model reconstructs detail from the corrected image. Pick a profile in the
-**Light** tab or in the preview window of an image that is not upscaled yet; the
-preview's right-hand side shows the result live.
+**Light** tab; the photo on the stage shows the result live (**Compare** puts
+it side by side with the original).
 
 | Profile | Effect |
 |---|---|
@@ -250,7 +251,7 @@ A camera look gives a photo the colour rendering and character associated
 with a camera maker's picture styles or a classic film stock: white balance,
 tone curve, highlight roll-off, shadow tones, colour separation per hue,
 micro-contrast, sharpening and (for film looks) grain — not a single colour
-filter. In the **Look** tab (or the preview window) click the look button to
+filter. In the **Look** tab click the look button to
 open the gallery: every look is a card previewed on your own photo, filtered by
 category (All, ★ Favorites, Sony, Canon, Nikon, Fujifilm, Leica, Hasselblad,
 Film, Monochrome, My Looks). Star a card to make it a favorite.
@@ -349,10 +350,9 @@ use conventional image processing (morphology, guided filtering, levels) —
 AI is used only where it is clearly better: faces, colorization and
 upscaling.
 
-**Before / after.** Click the compare button of a restored photo to compare
-*Original Scan* and *Restored* with the slider, zoom, pan, 100 % and fit.
-Before restoring, the preview's **Preview Restoration** button shows the
-current settings on a reduced-size copy.
+**Before / after.** A restored photo compares *Original Scan* and *Restored*
+on the stage with **Compare**, zoom and pan. Before restoring, **Preview
+Restoration** on the stage shows the current settings on a reduced-size copy.
 
 **Output.** Originals are never modified — Pixelift refuses to write to the
 source file whatever the folder or file-name settings. Results go to a

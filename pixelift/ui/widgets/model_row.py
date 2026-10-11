@@ -56,10 +56,23 @@ class ModelRow(Adw.ActionRow):
         ):
             self.add_suffix(widget)
 
-        self._unsubscribe: Callable[[], None] = tracker.subscribe(self._on_change)
-        self.connect("destroy", lambda _w: self._unsubscribe())
-        self.connect("unrealize", lambda _w: self._unsubscribe())
+        # Follow the tracker only while shown: dialogs re-realize their content
+        # when they switch between floating and bottom-sheet layouts.
+        self._unsubscribe: Callable[[], None] | None = None
+        self.connect("realize", lambda _w: self._subscribe())
+        self.connect("unrealize", lambda _w: self._unsubscribe_tracker())
+        self.connect("destroy", lambda _w: self._unsubscribe_tracker())
         self.refresh()
+
+    def _subscribe(self) -> None:
+        if self._unsubscribe is None:
+            self._unsubscribe = self.tracker.subscribe(self._on_change)
+        self.refresh()  # catch up on anything missed while unrealized
+
+    def _unsubscribe_tracker(self) -> None:
+        if self._unsubscribe is not None:
+            self._unsubscribe()
+            self._unsubscribe = None
 
     def _on_change(self, model_id: str, state: DownloadState | None) -> None:
         if model_id != self.spec.id:

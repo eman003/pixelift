@@ -18,4 +18,5 @@ PYTHONPATH="$APPDIR/app"
 [ -d "$GPU_RUNTIME/torch" ] && PYTHONPATH="$PYTHONPATH:$GPU_RUNTIME"
 PYTHONPATH="$PYTHONPATH:$APPDIR/vendor"
 export PYTHONPATH
-exec "$PYTHON" -s -m pixelift "$@"
+# -P: never import modules from the current directory (the desktop entry starts in $HOME).
+exec "$PYTHON" -s -P -m pixelift "$@"

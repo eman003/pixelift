@@ -382,7 +382,7 @@ def process_image(
 
     fmt, _ = iu.OUTPUT_FORMATS[options.output_format]
     meta = loaded.metadata if options.preserve_metadata else None
-    kwargs = save_kwargs(fmt, meta, options.quality, scale)
+    kwargs = save_kwargs(fmt, meta, options.quality, scale, img.mode)
     if control:
         control.check()
     try:

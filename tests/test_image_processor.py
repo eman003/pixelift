@@ -301,3 +301,22 @@ def test_tiff_exif_is_preserved(tmp_path):
     exif.load(loaded.metadata.exif)
     assert exif.get(0x010F) == "Canon"
     assert 0x0100 not in exif  # TIFF layout tags (ImageWidth…) are dropped
+
+
+def test_icc_profile_only_kept_for_matching_mode():
+    from PIL import ImageCms
+
+    from pixelift.utils.metadata import ImageMetadata, save_kwargs
+
+    srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    meta = ImageMetadata(icc_profile=srgb)
+    assert save_kwargs("PNG", meta, 90, mode="RGB")["icc_profile"] == srgb
+    assert "icc_profile" not in save_kwargs("PNG", meta, 90, mode="L")
+
+
+def test_oversized_exif_is_left_out_of_jpeg():
+    from pixelift.utils.metadata import ImageMetadata, save_kwargs
+
+    meta = ImageMetadata(exif=b"x" * 70000)
+    assert "exif" not in save_kwargs("JPEG", meta, 90)
+    assert save_kwargs("PNG", meta, 90)["exif"] == meta.exif

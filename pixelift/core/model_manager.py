@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import http.client
 import logging
 import os
 import shutil
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -22,6 +25,8 @@ from pixelift.storage import paths
 log = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]  # (bytes_done, bytes_total)
+TEMP_PREFIX = ".download-"
+STALE_TEMP_SECONDS = 6 * 3600  # older temp files are left over from killed downloads
 
 
 @dataclass(frozen=True)
@@ -45,6 +50,23 @@ class ModelManager:
     ) -> None:
         self.models_dir = models_dir or paths.models_dir()
         self._specs = {s.id: s for s in (specs if specs is not None else all_specs())}
+        self._remove_stale_temp_files()
+
+    def _remove_stale_temp_files(self) -> None:
+        """Delete partial files left behind by downloads or installs that were
+        killed (logout, crash, power loss) before they could clean up."""
+        try:
+            leftovers = list(self.models_dir.glob(TEMP_PREFIX + "*"))
+        except OSError:
+            return
+        cutoff = time.time() - STALE_TEMP_SECONDS
+        for path in leftovers:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+                    log.info("Removed stale partial download %s", path)
+            except OSError:
+                pass
 
     # --- queries -----------------------------------------------------------
     def spec(self, model_id: str) -> ModelSpec:
@@ -115,7 +137,18 @@ class ModelManager:
             )
         self.models_dir.mkdir(parents=True, exist_ok=True)
         target = self.path_for(spec)
-        shutil.copyfile(source, target)
+        # Copy next to the target, then rename: an interrupted copy must not
+        # leave a truncated file that looks installed.
+        fd, tmp_name = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=self.models_dir)
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            shutil.copyfile(source, tmp)
+            os.replace(tmp, target)
+        except OSError as exc:
+            raise _download_error(spec, exc) from exc
+        finally:
+            tmp.unlink(missing_ok=True)
         return target
 
     def download(
@@ -133,7 +166,7 @@ class ModelManager:
         request = urllib.request.Request(
             spec.url, headers={"User-Agent": f"pixelift/{__version__}"}
         )
-        fd, tmp_name = tempfile.mkstemp(prefix=".download-", dir=self.models_dir)
+        fd, tmp_name = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=self.models_dir)
         tmp = Path(tmp_name)
         digest = hashlib.sha256()
         try:
@@ -157,13 +190,35 @@ class ModelManager:
                     ["Try downloading again", "Check your internet connection"],
                 )
             os.replace(tmp, target)
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # URLError, timeouts and resets are OSErrors; a connection dropped
+            # mid-file raises http.client.IncompleteRead.
             log.error("Download of %s failed: %s", spec.id, exc)
-            raise ModelDownloadError(
-                f"Could not download {spec.name}: {getattr(exc, 'reason', exc)}",
-                ["Check your internet connection", "Try again later"],
-            ) from exc
+            raise _download_error(spec, exc) from exc
         finally:
             tmp.unlink(missing_ok=True)
         log.info("Installed model %s (%s)", spec.id, target)
         return target
+
+
+def _download_error(spec: ModelSpec, exc: BaseException) -> ModelDownloadError:
+    if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, errno.EDQUOT):
+        return ModelDownloadError(
+            f"Not enough disk space to install {spec.name} ({spec.size_mb:.0f} MB).",
+            ["Free up disk space", "Try again"],
+        )
+    if isinstance(exc, urllib.error.URLError | http.client.HTTPException | TimeoutError):
+        reason = getattr(exc, "reason", None) or exc
+        return ModelDownloadError(
+            f"Could not download {spec.name}: {reason}",
+            ["Check your internet connection", "Try again later"],
+        )
+    if isinstance(exc, ConnectionError):
+        return ModelDownloadError(
+            f"Could not download {spec.name}: the connection was lost.",
+            ["Check your internet connection", "Try again later"],
+        )
+    return ModelDownloadError(
+        f"Could not install {spec.name}: {getattr(exc, 'strerror', None) or exc}",
+        ["Check that the models folder is writable", "Try again"],
+    )

@@ -28,6 +28,14 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.7.5" date="2026-10-11">
+      <description>
+        <p>Finished photos are redone after changing the scale, model or file settings,
+          TIFF photos keep their EXIF data, and a result is never written over another
+          queued original. Model downloads, colour profiles and many smaller issues are
+          fixed too.</p>
+      </description>
+    </release>
     <release version="1.7.4" date="2026-10-11">
       <description>
         <p>Removing a photo that has just started processing now says so, and removing

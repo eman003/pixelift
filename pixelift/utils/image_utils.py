@@ -12,12 +12,17 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from pixelift.core.errors import InvalidImageError
+from pixelift.core.errors import ImageTooLargeError, InvalidImageError
 from pixelift.utils.metadata import ImageMetadata, extract_metadata
+from pixelift.utils.system import available_ram_bytes
 
 # Large images are a core use case; keep Pillow's bomb check but raise the bar
-# to ~1 gigapixel. Memory is checked separately before processing.
+# to ~1 gigapixel. Memory is checked separately before processing. Pillow only
+# warns between this and twice it, so ``_open`` refuses anything above it.
 Image.MAX_IMAGE_PIXELS = 1_000_000_000
+# Decoded bytes per pixel when building a preview: Pillow keeps RGB as 4 bytes,
+# and the 8-bit / orientation / RGBA conversions hold a second copy.
+_PREVIEW_BYTES_PER_PIXEL = 8
 
 SUPPORTED_EXTENSIONS = frozenset(
     {".png", ".jpg", ".jpeg", ".jpe", ".webp", ".tif", ".tiff", ".bmp"}
@@ -104,14 +109,45 @@ def _is_own_output(relative: Path) -> bool:
 
 def _open(path: Path) -> Image.Image:
     try:
-        return Image.open(path)
+        img = Image.open(path)
     except FileNotFoundError:
         raise InvalidImageError(f"The file {path.name} no longer exists.") from None
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+    except Image.DecompressionBombError:
+        raise _too_large(path) from None
+    except (UnidentifiedImageError, OSError) as exc:
         raise InvalidImageError(
             f"{path.name} is not a supported image or is damaged.",
             ["Supported formats: PNG, JPEG, WebP, TIFF, BMP"],
         ) from exc
+    width, height = img.size
+    if width * height > Image.MAX_IMAGE_PIXELS:
+        img.close()
+        raise _too_large(path)
+    return img
+
+
+def _too_large(path: Path) -> ImageTooLargeError:
+    return ImageTooLargeError(
+        f"{path.name} has more than {Image.MAX_IMAGE_PIXELS // 1_000_000:,} megapixels.",
+        ["Split the image into parts"],
+    )
+
+
+def _check_preview_memory(img: Image.Image, path: Path) -> None:
+    """Refuse to decode ``img`` whole when that would exhaust memory.
+
+    Thumbnails and previews of PNG, TIFF… decode every pixel; a small file can
+    declare a huge canvas. Call after ``draft``, which shrinks JPEG decodes.
+    """
+    width, height = img.size
+    needed = width * height * _PREVIEW_BYTES_PER_PIXEL
+    available = available_ram_bytes()
+    if needed > available // 2:
+        raise ImageTooLargeError(
+            f"{path.name} ({width}×{height}) needs about {human_size(needed)} of memory "
+            f"to preview, but only {human_size(available)} is available.",
+            ["Close other applications", "Split the image into parts"],
+        )
 
 
 def probe_image(path: Path) -> ImageInfo:
@@ -189,6 +225,7 @@ def make_thumbnail(path: Path, size: int = 128) -> Image.Image:
     with _open(Path(path)) as img:
         if img.format == "JPEG":
             img.draft("RGB", (size * 2, size * 2))
+        _check_preview_memory(img, Path(path))
         img = ImageOps.exif_transpose(img) or img
         img = _to_8bit(img)
         img.thumbnail((size, size), Image.Resampling.LANCZOS)
@@ -200,6 +237,7 @@ def load_preview(path: Path, max_side: int) -> tuple[Image.Image, tuple[int, int
     with _open(Path(path)) as img:
         if img.format == "JPEG":
             img.draft("RGB", (max_side, max_side))
+        _check_preview_memory(img, Path(path))
         full = probe_image(Path(path))
         img = ImageOps.exif_transpose(img) or img
         img = _to_8bit(img)
@@ -213,6 +251,7 @@ def load_region(
 ) -> Image.Image:
     """Crop ``box`` (oriented image coordinates) and resize it to ``out_size``."""
     with _open(Path(path)) as img:
+        _check_preview_memory(img, Path(path))
         img = ImageOps.exif_transpose(img) or img
         img = _to_8bit(img)
         region = img.crop(box)

@@ -1448,7 +1448,10 @@ class MainWindow(Adw.ApplicationWindow):
         elif row.item.status is ItemStatus.PROCESSING:
             # It was queued when clicked, but a worker started it first.
             self.toasts.add_toast(
-                Adw.Toast(title=f"{row.item.path.name} has already started processing")
+                Adw.Toast(
+                    title=f"{row.item.path.name} has already started processing",
+                    use_markup=False,
+                )
             )
             row.refresh()
 
@@ -1563,7 +1566,9 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_device_fallback(self, device: dm.DeviceInfo, reason: str) -> None:
         self._show_device(device)
-        self.toasts.add_toast(Adw.Toast(title=f"{reason} — continuing on the CPU", timeout=6))
+        self.toasts.add_toast(
+            Adw.Toast(title=f"{reason} — continuing on the CPU", timeout=6, use_markup=False)
+        )
         self._upscaler_key = None  # rebuild with the preferred device next time
 
     def start(

@@ -340,3 +340,49 @@ def test_disk_check_uses_lossy_estimate_for_jpeg(tmp_path, monkeypatch):
     ip.check_feasible(6000, 4000, ProcessingOptions(output_format="jpeg"), out)
     with pytest.raises(OutputError):
         ip.check_feasible(6000, 4000, ProcessingOptions(output_format="png"), out)
+
+
+def test_canvas_above_the_pixel_limit_is_refused(image_factory, monkeypatch):
+    # Pillow only warns up to twice MAX_IMAGE_PIXELS; that gap must not decode.
+    path = image_factory("big.png", size=(40, 30))
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    for read in (iu.probe_image, iu.load_image, iu.make_thumbnail):
+        with pytest.raises(ImageTooLargeError):
+            read(path)
+
+
+@pytest.mark.parametrize("name", ["bomb.png", "bomb.jpg"])
+def test_previews_refuse_canvases_that_do_not_fit_in_memory(image_factory, monkeypatch, name):
+    path = image_factory(name, size=(400, 300))
+    monkeypatch.setattr(iu, "available_ram_bytes", lambda: 1000)
+    with pytest.raises(ImageTooLargeError, match="preview"):
+        iu.make_thumbnail(path, 64)
+    with pytest.raises(ImageTooLargeError, match="preview"):
+        iu.load_preview(path, 64)
+    with pytest.raises(ImageTooLargeError, match="preview"):
+        iu.load_region(path, (0, 0, 10, 10), (10, 10))
+
+
+def _gps_photo(path: Path) -> Path:
+    exif = Image.Exif()
+    exif[0x010F] = "Camera Maker"
+    gps = exif.get_ifd(0x8825)
+    gps[1], gps[2] = "N", (51.0, 30.0, 0.0)
+    Image.new("RGB", (40, 30), (90, 120, 150)).save(path, exif=exif.tobytes())
+    return path
+
+
+@pytest.mark.parametrize("strip", [False, True])
+def test_gps_location_can_be_left_out(tmp_path, upscaler, tiny_specs, strip):
+    path = _gps_photo(tmp_path / "gps.jpg")
+    options = ProcessingOptions(scale=4, model="test-x4", strip_location=strip)
+    with Image.open(process_image(path, options, upscaler).output) as out:
+        exif = out.getexif()
+        assert exif[0x010F] == "Camera Maker"  # the rest of the EXIF is kept
+        assert bool(exif.get_ifd(0x8825)) is not strip
+
+
+def test_strip_location_changes_the_output_tag():
+    from pixelift.core.image_processor import output_tag
+
+    assert output_tag(ProcessingOptions()) != output_tag(ProcessingOptions(strip_location=True))

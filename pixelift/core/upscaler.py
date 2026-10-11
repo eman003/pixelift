@@ -151,9 +151,7 @@ class TorchUpscaler(Upscaler):
             net = self._nets.get(spec.id)
             if net is not None:
                 return net
-            path = self.models.path_for(spec)
-            if not path.is_file():
-                raise ModelNotInstalledError(f"{spec.name} is not installed.")
+            path = self.models.ensure_verified(spec)
             log.info("Loading model %s on %s", spec.id, self.device.id)
             try:
                 with torch.serialization.safe_globals(list(spec.safe_globals)):

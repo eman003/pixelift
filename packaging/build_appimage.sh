@@ -20,12 +20,21 @@ exec "$HERE/usr/bin/pixelift" "$@"
 APPRUN
 chmod 755 "$APPDIR/AppRun"
 
-TOOL="$BUILD/tools/appimagetool-x86_64.AppImage"
+# A tagged release, verified before it is ever run.
+TOOL_VERSION="1.9.1"
+TOOL_SHA256="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"
+TOOL="$BUILD/tools/appimagetool-$TOOL_VERSION-x86_64.AppImage"
 if [ ! -x "$TOOL" ]; then
     mkdir -p "$(dirname "$TOOL")"
-    curl -fsSL -o "$TOOL" \
-        https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-    chmod +x "$TOOL"
+    curl -fsSL -o "$TOOL.part" \
+        "https://github.com/AppImage/appimagetool/releases/download/$TOOL_VERSION/appimagetool-x86_64.AppImage"
+    if ! echo "$TOOL_SHA256  $TOOL.part" | sha256sum --check --status; then
+        rm -f "$TOOL.part"
+        echo "appimagetool $TOOL_VERSION failed checksum verification" >&2
+        exit 1
+    fi
+    chmod +x "$TOOL.part"
+    mv "$TOOL.part" "$TOOL"
 fi
 OUT="$BUILD/Pixelift-${VERSION}-x86_64.AppImage"
 ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --comp zstd -n "$APPDIR" "$OUT"

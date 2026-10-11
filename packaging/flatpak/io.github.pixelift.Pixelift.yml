@@ -3,7 +3,8 @@
 #   flatpak-builder --user --install --force-clean \
 #       --build-args=--share=network build/flatpak \
 #       packaging/flatpak/io.github.pixelift.Pixelift.yml
-# For Flathub, replace the pip step with generated sources (flatpak-pip-generator).
+# The wheels are pinned by hash (packaging/requirements-cp312.txt). For Flathub,
+# replace the pip step with generated sources (flatpak-pip-generator).
 id: io.github.pixelift.Pixelift
 runtime: org.gnome.Platform
 runtime-version: "47"
@@ -15,16 +16,26 @@ finish-args:
   - --socket=fallback-x11
   - --device=dri          # GPU access (CUDA/ROCm need the matching driver extensions)
   - --share=network       # only used to download AI models on request
-  - --filesystem=home     # read source images / write upscaled results
+  # Read photos and write results next to them, in the folders photos live in.
+  # Not all of $HOME: no access to dotfiles, shell start-up files or keys.
+  # Files elsewhere can still be opened through the file chooser portal;
+  # to also write results next to them: flatpak override --user --filesystem=home
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-download
+  - --filesystem=xdg-desktop
+  - --filesystem=xdg-documents
 modules:
   - name: python-deps
     buildsystem: simple
     build-options:
       build-args: [--share=network]
     build-commands:
-      - pip3 install --prefix=/app --no-cache-dir
+      - pip3 install --prefix=/app --no-cache-dir --require-hashes --only-binary=:all:
           --index-url https://download.pytorch.org/whl/cpu
-          --extra-index-url https://pypi.org/simple torch numpy pillow
+          --extra-index-url https://pypi.org/simple -r requirements-cp312.txt
+    sources:
+      - type: file
+        path: ../requirements-cp312.txt
   - name: pixelift
     buildsystem: simple
     build-commands:

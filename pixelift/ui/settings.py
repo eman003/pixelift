@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from gi.repository import Adw, Gio, GLib, Gtk
+from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from pixelift.core import device_manager as dm
 from pixelift.models import KIND_LABELS, UPSCALE, all_families
@@ -140,7 +140,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
         group = Adw.PreferencesGroup(title="Files")
         page.add(group)
 
-        self.folder_row = Adw.ActionRow(title="Output folder")
+        # Paths and templates are shown as typed, never parsed as Pango markup.
+        self.folder_row = Adw.ActionRow(title="Output folder", use_markup=False)
         choose = Gtk.Button(
             icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Choose folder"
         )
@@ -167,7 +168,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         self.template_row.connect("changed", self._on_template_changed)
         group.add(self.template_row)
-        self.template_hint = Adw.ActionRow(title="", subtitle_selectable=False)
+        self.template_hint = Adw.ActionRow(title="", subtitle_selectable=False, use_markup=False)
         self.template_hint.add_css_class("property")
         group.add(self.template_hint)
         self._update_template_hint()
@@ -201,6 +202,16 @@ class PreferencesDialog(Adw.PreferencesDialog):
         )
         meta.connect("notify::active", lambda r, _p: self._set("preserve_metadata", r.get_active()))
         fmt_group.add(meta)
+        location = Adw.SwitchRow(
+            title="Remove location",
+            subtitle="Leave GPS coordinates out of the copied metadata",
+            active=self.settings.strip_location,
+        )
+        location.connect(
+            "notify::active", lambda r, _p: self._set("strip_location", r.get_active())
+        )
+        meta.bind_property("active", location, "sensitive", GObject.BindingFlags.SYNC_CREATE)
+        fmt_group.add(location)
 
     def _update_folder_row(self) -> None:
         folder = self.settings.output_dir
@@ -333,7 +344,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
 
         folder_group = Adw.PreferencesGroup()
         page.add(folder_group)
-        folder = Adw.ActionRow(title="Models folder", subtitle=str(manager.models_dir))
+        folder = Adw.ActionRow(
+            title="Models folder", subtitle=str(manager.models_dir), use_markup=False
+        )
         open_btn = Gtk.Button(
             icon_name="folder-open-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Open folder"
         )

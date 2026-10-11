@@ -66,7 +66,9 @@ class FirstRunDialog(Adw.Dialog):
         )
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         group = Adw.PreferencesGroup()
-        self.device_row = Adw.ActionRow(title="Processing device", subtitle="Detecting…")
+        self.device_row = Adw.ActionRow(
+            title="Processing device", subtitle="Detecting…", use_markup=False
+        )
         self.device_row.add_prefix(Gtk.Image(icon_name="computer-symbolic"))
         self.device_spinner = Gtk.Spinner(spinning=True)
         self.device_row.add_suffix(self.device_spinner)

@@ -205,3 +205,17 @@ def test_gui_entry_point_opens_files(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["pixelift-gui", "a.jpg", "--verbose", "b.png"])
     assert main.gui_main() == 0
     assert opened == [["a.jpg", "b.png"]]
+
+
+def test_cli_strip_location(tmp_path, tiny_specs):
+    src = tmp_path / "gps.jpg"
+    exif = Image.Exif()
+    exif[0x010F] = "Camera Maker"
+    exif.get_ifd(0x8825)[1] = "N"
+    Image.new("RGB", (8, 8)).save(src, exif=exif.tobytes())
+    out_dir = tmp_path / "out"
+    args = [str(src), "--model", "test-x4", "--output", str(out_dir), "--device", "cpu"]
+    assert cli.run_cli([*args, "--strip-location"]) == 0
+    with Image.open(out_dir / "gps_4x.png") as img:
+        assert img.getexif()[0x010F] == "Camera Maker"
+        assert not img.getexif().get_ifd(0x8825)

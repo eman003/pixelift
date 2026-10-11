@@ -173,6 +173,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(existing="skip")
     parser.add_argument("--no-metadata", action="store_true", help="do not copy EXIF/ICC metadata")
     parser.add_argument(
+        "--strip-location",
+        action=argparse.BooleanOptionalAction,
+        default=settings.strip_location,
+        help="leave GPS location out of the copied EXIF",
+    )
+    parser.add_argument(
         "--no-recursive", action="store_true", help="do not descend into subfolders"
     )
     parser.add_argument(
@@ -425,6 +431,7 @@ def run_cli(argv: list[str]) -> int:
     options.filename_template = args.template
     options.existing = args.existing
     options.preserve_metadata = not args.no_metadata
+    options.strip_location = args.strip_location
     settings.lighting_profile = args.lighting
     if args.lighting_intensity is not None:
         settings.lighting_intensity = args.lighting_intensity

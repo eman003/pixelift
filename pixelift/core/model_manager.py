@@ -9,6 +9,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -50,6 +51,9 @@ class ModelManager:
     ) -> None:
         self.models_dir = models_dir or paths.models_dir()
         self._specs = {s.id: s for s in (specs if specs is not None else all_specs())}
+        # (path, size, mtime_ns, sha256) of files already verified this session.
+        self._verified: set[tuple[Path, int, int, str]] = set()
+        self._verified_lock = threading.Lock()
         self._remove_stale_temp_files()
 
     def _remove_stale_temp_files(self) -> None:
@@ -122,6 +126,33 @@ class ModelManager:
         spec = self.spec(spec) if isinstance(spec, str) else spec
         path = self.path_for(spec)
         return path.is_file() and sha256_file(path) == spec.sha256
+
+    def ensure_verified(self, spec: ModelSpec | str) -> Path:
+        """The weights path, after checking its SHA-256 (once per file version).
+
+        Downloads are verified, but anything could have been put in the models
+        folder since; only the expected bytes are ever deserialised.
+        """
+        spec = self.spec(spec) if isinstance(spec, str) else spec
+        path = self.path_for(spec)
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            raise ModelNotInstalledError(f"{spec.name} is not installed.") from None
+        key = (path, stat.st_size, stat.st_mtime_ns, spec.sha256)
+        with self._verified_lock:
+            if key in self._verified:
+                return path
+        if sha256_file(path) != spec.sha256:
+            log.error("Checksum mismatch for %s", path)
+            raise ModelNotInstalledError(
+                f"The file for {spec.name} is damaged or is not the official release.",
+                ["Remove the model in Settings → Models and download it again"],
+                title="Unable to load AI model.",
+            )
+        with self._verified_lock:
+            self._verified.add(key)
+        return path
 
     def remove(self, spec: ModelSpec | str) -> None:
         path = self.path_for(spec)

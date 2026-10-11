@@ -11,6 +11,7 @@ from PIL import Image
 log = logging.getLogger(__name__)
 
 ORIENTATION_TAG = 0x0112
+GPS_IFD_TAG = 0x8825
 # A TIFF's EXIF is its first image directory, which also describes the pixel
 # layout (size, strips, compression…). Only these descriptive tags carry over.
 TIFF_DESCRIPTIVE_TAGS = frozenset(
@@ -30,7 +31,7 @@ TIFF_DESCRIPTIVE_TAGS = frozenset(
         0x013C,  # HostComputer
         0x8298,  # Copyright
         0x8769,  # Exif IFD
-        0x8825,  # GPS IFD
+        GPS_IFD_TAG,
     }
 )
 
@@ -80,6 +81,24 @@ def extract_metadata(img: Image.Image) -> ImageMetadata:
         except (TypeError, ValueError):
             pass
     return meta
+
+
+def without_location(meta: ImageMetadata) -> ImageMetadata:
+    """A copy of ``meta`` whose EXIF has no GPS block (where the photo was taken)."""
+    if not meta.exif:
+        return meta
+    try:
+        exif = Image.Exif()
+        exif.load(meta.exif)
+        if GPS_IFD_TAG not in exif:
+            return meta
+        del exif[GPS_IFD_TAG]
+        stripped = exif.tobytes() if len(exif) else None
+    except Exception:
+        # Never let location through because the EXIF could not be edited.
+        log.warning("Could not remove the location from EXIF; dropping EXIF", exc_info=True)
+        stripped = None
+    return ImageMetadata(stripped, meta.icc_profile, meta.dpi)
 
 
 JPEG_MAX_EXIF = 65533  # bytes in one APP1 segment; Pillow refuses more

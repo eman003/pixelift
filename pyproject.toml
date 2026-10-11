@@ -18,9 +18,9 @@ classifiers = [
   "Topic :: Multimedia :: Graphics",
 ]
 dependencies = [
-  "torch>=2.2",
+  "torch>=2.6",  # 2.6 fixed a weights_only=True bypass (CVE-2025-32434)
   "numpy>=1.26",
-  "pillow>=10.2",
+  "pillow>=11.3",  # decoder and bundled codec security fixes
   # PyGObject (GTK4 + libadwaita bindings) is taken from the system on Ubuntu:
   #   sudo apt install python3-gi gir1.2-gtk-4.0 gir1.2-adw-1
   # Create the venv with --system-site-packages, or `pip install .[gui]`.

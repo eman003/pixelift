@@ -4,6 +4,31 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Remove location** (Settings → Files, `--strip-location`): copy EXIF data
+  without the GPS coordinates of where the photo was taken.
+
+### Security
+
+- Images whose declared size is too large to decode are refused before they
+  are read, instead of exhausting memory while building a thumbnail or
+  preview. Canvases above the 1-gigapixel limit are always refused.
+- Model weights are checked against their SHA-256 before every load (once per
+  file version), not only when downloaded; a substituted file is never
+  deserialised.
+- Requires Pillow 11.3 or newer and PyTorch 2.6 or newer (security fixes in
+  image decoders and in `torch.load`).
+- Text from file and folder names is no longer read as Pango markup in
+  notifications and settings rows (a folder named `R&D` showed blank).
+- Builds install the bundled Python packages from a hash-locked
+  `packaging/requirements-cp312.txt`, and the AppImage tool is a pinned,
+  checksum-verified release.
+- The Flatpak can access Pictures, Downloads, Desktop and Documents instead of
+  the whole home folder.
+
 ## [1.7.5] - 2026-10-11
 
 ### Fixed

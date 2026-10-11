@@ -10,16 +10,23 @@ VENDOR="$BUILD/vendor-$PYVER"
 
 build_vendor() {
     # CPU PyTorch + numpy + Pillow, for the system Python ABI. Cached between builds.
-    if [ -f "$VENDOR/.complete" ]; then return; fi
+    # Exact versions and wheel hashes come from the lock file (lock_vendor.sh).
+    local lock="$ROOT/packaging/requirements-cp${PYVER/./}.txt"
+    if [ ! -f "$lock" ]; then
+        echo "No dependency lock for Python $PYVER: $lock (see packaging/lock_vendor.sh)" >&2
+        exit 1
+    fi
+    if [ -f "$VENDOR/.complete" ] && cmp -s "$lock" "$VENDOR/.complete"; then return; fi
     rm -rf "$VENDOR"
     python3 -m pip install --no-cache-dir --target "$VENDOR" \
+        --require-hashes --only-binary=:all: \
         --index-url https://download.pytorch.org/whl/cpu \
-        --extra-index-url https://pypi.org/simple torch numpy pillow
+        --extra-index-url https://pypi.org/simple -r "$lock"
     # Trim files not needed at runtime.
     rm -rf "$VENDOR"/torch/include "$VENDOR"/torch/share/cmake "$VENDOR"/bin \
            "$VENDOR"/torch/test "$VENDOR"/caffe2
     find "$VENDOR" -name "__pycache__" -type d -prune -exec rm -rf {} +
-    touch "$VENDOR/.complete"
+    cp "$lock" "$VENDOR/.complete"  # rebuilt when the lock changes
 }
 
 # stage_app <libdir>  -> <libdir>/{app,vendor}

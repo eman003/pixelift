@@ -33,7 +33,7 @@ from pixelift.utils import image_utils as iu
 
 if TYPE_CHECKING:
     from pixelift.core.restoration.pipeline import Restorer
-from pixelift.utils.metadata import save_kwargs
+from pixelift.utils.metadata import save_kwargs, without_location
 from pixelift.utils.system import available_ram_bytes
 
 log = logging.getLogger(__name__)
@@ -58,6 +58,7 @@ class ProcessingOptions:
     filename_template: str = iu.DEFAULT_TEMPLATE
     existing: ExistingPolicy = "skip"
     preserve_metadata: bool = True
+    strip_location: bool = False  # leave GPS coordinates out of copied EXIF
     jpeg_background: tuple[int, int, int] = (255, 255, 255)
     lighting: LightingSettings = field(default_factory=LightingSettings)
     camera_look: CameraLookSettings = field(default_factory=CameraLookSettings)
@@ -138,6 +139,7 @@ def output_tag(options: ProcessingOptions) -> str:
             options.output_dir or "",
             options.filename_template,
             options.preserve_metadata,
+            options.strip_location,
         )
     )
 
@@ -386,6 +388,8 @@ def process_image(
 
     fmt, _ = iu.OUTPUT_FORMATS[options.output_format]
     meta = loaded.metadata if options.preserve_metadata else None
+    if meta is not None and options.strip_location:
+        meta = without_location(meta)
     kwargs = save_kwargs(fmt, meta, options.quality, scale, img.mode)
     if control:
         control.check()

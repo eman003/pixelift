@@ -49,9 +49,9 @@ colour casts, faces, and optional colorization of black-and-white photos.
   (DeOldify), Modern Finish, and optional upscaling — see
   [Photo restoration](#photo-restoration)
 - Before/after comparison: slider, toggle, zoom, pan, fit, 100 %
-- Keeps EXIF orientation (no accidental rotation), EXIF metadata, ICC colour
-  profiles, DPI, transparency and grayscale
-- Model manager with SHA-256-verified downloads
+- Keeps EXIF orientation (no accidental rotation), EXIF metadata (optionally
+  without GPS location), ICC colour profiles, DPI, transparency and grayscale
+- Model manager with SHA-256-verified downloads, re-checked before every load
 - Light, dark and system theme; responsive layout
 - A CLI that uses exactly the same engine as the app
 
@@ -402,6 +402,7 @@ pixelift --restore --restore-level heavy --face strong --fidelity 30 damaged.tif
 | `--list-looks` | List the camera looks and your saved looks |
 | `--overwrite` / `--rename` | What to do if the output exists (default: skip) |
 | `--no-metadata` | Don't copy EXIF/ICC |
+| `--strip-location` | Copy EXIF but leave out GPS location (`--no-strip-location` overrides the setting) |
 | `--threads N` | CPU threads |
 | `--list-devices`, `--list-models` | Show hardware / models |
 | `-r`, `--restore` | Restore photos instead of only upscaling (output in `<input dir>/restored`) |
@@ -546,7 +547,13 @@ flatpak-builder --user --install --force-clean --build-args=--share=network \
 ```
 
 Both scripts bundle the CPU build of PyTorch for the build machine's Python
-version (build on Ubuntu 24.04 for 24.04 targets).
+version (build on Ubuntu 24.04 for 24.04 targets). The bundled packages are
+pinned by version and SHA-256 in `packaging/requirements-cp312.txt`; refresh
+it with `packaging/lock_vendor.sh` and review the diff.
+
+The Flatpak can read and write your Pictures, Downloads, Desktop and Documents
+folders, not your whole home folder. To save results next to photos stored
+elsewhere, run `flatpak override --user --filesystem=home io.github.pixelift.Pixelift`.
 
 ### Known limitations
 

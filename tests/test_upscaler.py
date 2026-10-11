@@ -75,6 +75,18 @@ def test_damaged_model_file(manager, upscaler):
         upscaler.upscale(rgb(8, 8), 4, "test-x4")
 
 
+def test_replaced_model_file_is_never_deserialised(manager, upscaler, tiny_specs, monkeypatch):
+    # A well-formed checkpoint that is not the verified release.
+    spec = tiny_specs["x4"]
+    state = spec.build().state_dict()
+    first = next(iter(state))
+    state[first] = state[first] + 1
+    torch.save({"params": state}, manager.path_for(spec))
+    monkeypatch.setattr(torch, "load", lambda *a, **k: pytest.fail("loaded unverified weights"))
+    with pytest.raises(ModelNotInstalledError, match="not the official release"):
+        upscaler.upscale(rgb(8, 8), 4, "test-x4")
+
+
 # --- tiling -------------------------------------------------------------------------
 def test_tile_starts_cover_and_overlap():
     for length in (1, 63, 64, 65, 500, 1000, 1023):

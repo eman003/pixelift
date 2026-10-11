@@ -17,6 +17,24 @@ from pixelift.models import all_families, all_specs, candidate_specs, get_spec
 from pixelift.storage import paths
 
 
+def test_ensure_verified_hashes_each_file_version_once(manager, tiny_specs, monkeypatch):
+    import pixelift.core.model_manager as mm
+
+    calls = []
+    real = mm.sha256_file
+    monkeypatch.setattr(mm, "sha256_file", lambda p: calls.append(p) or real(p))
+    spec = tiny_specs["x4"]
+    path = manager.ensure_verified(spec)
+    assert manager.ensure_verified(spec) == path
+    assert len(calls) == 1
+    path.write_bytes(b"tampered")
+    with pytest.raises(ModelNotInstalledError, match="not the official release"):
+        manager.ensure_verified(spec)
+    path.unlink()
+    with pytest.raises(ModelNotInstalledError, match="not installed"):
+        manager.ensure_verified(spec)
+
+
 def test_builtin_catalogue_is_consistent():
     specs = {s.id: s for s in all_specs()}
     for spec_id in ("realesrgan-x4plus", "realesrgan-x2plus", "realesr-general-x4v3"):

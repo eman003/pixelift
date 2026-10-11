@@ -42,6 +42,7 @@ class Settings:
     filename_template: str = DEFAULT_TEMPLATE
     existing: str = "skip"
     preserve_metadata: bool = True
+    strip_location: bool = False  # leave GPS coordinates out of copied metadata
     # Lighting (applied before upscaling); the lighting_<name> values are the
     # Custom profile's adjustments, -100..100.
     lighting_profile: str = lighting.ORIGINAL
@@ -263,6 +264,7 @@ class Settings:
             filename_template=self.filename_template or DEFAULT_TEMPLATE,
             existing=self.existing,  # type: ignore[arg-type]
             preserve_metadata=self.preserve_metadata,
+            strip_location=self.strip_location,
             lighting=self.lighting(),
             camera_look=self.camera_look_settings(),
             restoration=self.restoration() if self.mode == "restore" else None,

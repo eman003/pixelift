@@ -94,6 +94,7 @@ class ProcessResult:
     restoration: str | None = None  # restoration_tag() the output was made with; None: upscaled
     colorized: bool = False
     faces: int = 0  # faces restored
+    output_settings: str = ""  # output_tag() the output was made with
 
     @property
     def restored(self) -> bool:
@@ -120,6 +121,23 @@ def restoration_tag(options: ProcessingOptions, colorized: bool) -> str:
     """Identifies what a restored output was made with (for staleness checks)."""
     assert options.restoration is not None
     return f"{options.restoration.tag(colorized)}|{int(colorized)}|{options.restoration.scale}"
+
+
+def output_tag(options: ProcessingOptions) -> str:
+    """Identifies the model, scale and file settings an output was made with
+    (for staleness checks; lighting, look and restoration have their own tags)."""
+    return "|".join(
+        str(part)
+        for part in (
+            options.model,
+            options.output_scale,
+            options.output_format,
+            options.quality,
+            options.output_dir or "",
+            options.filename_template,
+            options.preserve_metadata,
+        )
+    )
 
 
 def restoration_template(restoration: RestorationSettings, colorized: bool) -> str:
@@ -295,6 +313,7 @@ def process_image(
             look=options.camera_look.tag(),
             restoration=tag,
             colorized=colorize,
+            output_settings=output_tag(options),
         )
     check_feasible(info.width, info.height, options, output)
 
@@ -395,6 +414,7 @@ def process_image(
         restoration=tag,
         colorized=colorize,
         faces=faces,
+        output_settings=output_tag(options),
     )
 
 

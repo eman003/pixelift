@@ -42,7 +42,7 @@ from pixelift.core.errors import (
     UpscalerError,
     friendly_error,
 )
-from pixelift.core.image_processor import restoration_tag
+from pixelift.core.image_processor import output_tag, restoration_tag
 from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
@@ -876,8 +876,8 @@ class MainWindow(Adw.ApplicationWindow):
         return restoration_tag(options, colorize)
 
     def _reset_stale(self) -> None:
-        """Results made with other lighting, camera look or restoration settings
-        (or in the other mode) are out of date: queue them again.
+        """Results made with other lighting, camera look, restoration, model, scale
+        or file settings (or in the other mode) are out of date: queue them again.
 
         Their files stay on disk (the settings are part of the file name), so
         switching back just finds and skips them.
@@ -886,6 +886,7 @@ class MainWindow(Adw.ApplicationWindow):
             return
         tag = self.app.settings.lighting().tag()
         look = self.app.settings.camera_look_settings().tag()
+        output = output_tag(self.app.settings.processing_options())
         stale = [
             r
             for r in self.rows
@@ -895,6 +896,7 @@ class MainWindow(Adw.ApplicationWindow):
                 r.item.result.lighting != tag
                 or r.item.result.look != look
                 or r.item.result.restoration != self._expected_restoration(r)
+                or r.item.result.output_settings != output
             )
         ]
         for row in stale:
@@ -1760,6 +1762,8 @@ class MainWindow(Adw.ApplicationWindow):
             )
         elif ev.kind is EventKind.BATCH_FINISHED:
             self._on_batch_finished()
+            # Settings changed during the batch were not checked against its results.
+            self._reset_stale()
         self._update_state()
 
     def _on_batch_finished(self) -> None:

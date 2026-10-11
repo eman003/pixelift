@@ -141,6 +141,7 @@ class BatchProcessor:
         self._started_at = 0.0
         self._remaining = 0
         self._claims: dict[Path, Path] = {}  # output -> source, guarded by _claims_lock
+        self._sources: frozenset[Path] = frozenset()  # every queued source file
         self._batch_ids: set[int] = set()  # items still in the batch, guarded by _take_lock
         # item id -> (output, source) planned for it, and how many planned items
         # share each source; guarded by _take_lock.
@@ -212,6 +213,9 @@ class BatchProcessor:
             for i in itertools.chain(items, others)
             if i.status in (ItemStatus.DONE, ItemStatus.SKIPPED) and i.result is not None
         }
+        # Every source file in the queue is an original: no other source may
+        # write its output there, whatever the folder, template and format.
+        self._sources = frozenset(_key(i.path) for i in itertools.chain(items, others))
         self._batch_ids = {i.id for i in self._items}
         self._planned_outputs = {}
         self._planned_sources = collections.Counter()
@@ -324,6 +328,8 @@ class BatchProcessor:
                 except Exception:  # noqa: BLE001 - the job reports it properly
                     continue
                 output, source = _key(output), _key(item.path)
+                if output in self._sources:
+                    continue  # an original; reserve_output finds another name
                 with self._take_lock:
                     if item.status is not ItemStatus.QUEUED:
                         continue  # withdrawn while planning
@@ -347,6 +353,8 @@ class BatchProcessor:
 
     def _claim(self, output: Path, source: Path) -> bool:
         output, source = _key(output), _key(source)
+        if output in self._sources and output != source:
+            return False  # another queued photo's original
         with self._claims_lock:
             return self._claims.setdefault(output, source) == source
 

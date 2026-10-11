@@ -44,7 +44,7 @@ version = { attr = "pixelift.__version__" }
 include = ["pixelift*"]
 
 [tool.setuptools.package-data]
-pixelift = ["ui/*.css", "data/*"]
+pixelift = ["ui/*.css", "data/**/*"]
 
 [tool.ruff]
 line-length = 100

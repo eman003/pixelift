@@ -272,3 +272,32 @@ def test_options_validation():
         ProcessingOptions(quality=0).validate()
     with pytest.raises(ValueError):
         ProcessingOptions(output_format="gif").validate()
+
+
+def test_output_tag_changes_with_model_scale_and_format():
+    from pixelift.core.image_processor import output_tag
+
+    base = ProcessingOptions()
+    assert output_tag(base) == output_tag(ProcessingOptions())
+    for change in (
+        {"scale": 2},
+        {"model": "other"},
+        {"output_format": "jpeg"},
+        {"filename_template": "{name}"},
+    ):
+        assert output_tag(ProcessingOptions(**change)) != output_tag(base)
+
+
+def test_tiff_exif_is_preserved(tmp_path):
+    from PIL import Image
+
+    from pixelift.utils.image_utils import load_image
+
+    path = tmp_path / "scan.tiff"
+    Image.new("RGB", (8, 6)).save(path, tiffinfo={0x010F: "Canon", 0x0112: 6})
+    loaded = load_image(path)
+    assert loaded.rgb.shape[:2] == (8, 6)  # rotated by the orientation tag
+    exif = Image.Exif()
+    exif.load(loaded.metadata.exif)
+    assert exif.get(0x010F) == "Canon"
+    assert 0x0100 not in exif  # TIFF layout tags (ImageWidth…) are dropped

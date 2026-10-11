@@ -1411,6 +1411,12 @@ class MainWindow(Adw.ApplicationWindow):
     def remove_row(self, row: QueueRow) -> None:
         if self._remove(row):
             self._after_removal()
+        elif row.item.status is ItemStatus.PROCESSING:
+            # It was queued when clicked, but a worker started it first.
+            self.toasts.add_toast(
+                Adw.Toast(title=f"{row.item.path.name} has already started processing")
+            )
+            row.refresh()
 
     def _remove(self, row: QueueRow) -> bool:
         if row.item.status is ItemStatus.PROCESSING:

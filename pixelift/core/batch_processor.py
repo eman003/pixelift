@@ -7,6 +7,7 @@ invoked on worker threads. The GTK layer forwards events to the main loop with
 
 from __future__ import annotations
 
+import collections
 import enum
 import itertools
 import logging
@@ -80,6 +81,7 @@ class EventKind(enum.Enum):
     ITEM_STARTED = "item_started"
     ITEM_PROGRESS = "item_progress"
     ITEM_FINISHED = "item_finished"
+    ITEM_WITHDRAWN = "item_withdrawn"  # taken out before it started; totals change
     PAUSED = "paused"
     RESUMED = "resumed"
     DEVICE_CHANGED = "device_changed"
@@ -139,7 +141,11 @@ class BatchProcessor:
         self._started_at = 0.0
         self._remaining = 0
         self._claims: dict[Path, Path] = {}  # output -> source, guarded by _claims_lock
-        self._planned_outputs: dict[int, Path] = {}  # item id -> name planned for it
+        self._batch_ids: set[int] = set()  # items still in the batch, guarded by _take_lock
+        # item id -> (output, source) planned for it, and how many planned items
+        # share each source; guarded by _take_lock.
+        self._planned_outputs: dict[int, tuple[Path, Path]] = {}
+        self._planned_sources: collections.Counter[Path] = collections.Counter()
         self._planned = False  # guarded by _lock
         self.summary: BatchSummary | None = None
         # One restoration engine for the whole batch: AI models load once.
@@ -177,13 +183,14 @@ class BatchProcessor:
         Returns False once a worker has picked it up (or it is not queued here).
         """
         with self._take_lock:
-            if item.status is not ItemStatus.QUEUED or item not in self._items:
+            if item.status is not ItemStatus.QUEUED or item.id not in self._batch_ids:
                 return False
             item.reset()
+            self._batch_ids.discard(item.id)
             # A new list: overall() and _finish() read it without the lock.
             self._items = [i for i in self._items if i is not item]
             self._release_planned(item)
-        self._emit(EventKind.ITEM_FINISHED)  # the totals changed
+        self._emit(EventKind.ITEM_WITHDRAWN, item)
         return True
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -205,7 +212,9 @@ class BatchProcessor:
             for i in itertools.chain(items, others)
             if i.status in (ItemStatus.DONE, ItemStatus.SKIPPED) and i.result is not None
         }
+        self._batch_ids = {i.id for i in self._items}
         self._planned_outputs = {}
+        self._planned_sources = collections.Counter()
         self._planned = False
         self._finished.clear()
         self._started_at = time.monotonic()
@@ -320,14 +329,18 @@ class BatchProcessor:
                         continue  # withdrawn while planning
                     with self._claims_lock:
                         if self._claims.setdefault(output, source) == source:
-                            self._planned_outputs[item.id] = output
+                            self._planned_outputs[item.id] = (output, source)
+                            self._planned_sources[source] += 1
 
     def _release_planned(self, item: QueueItem) -> None:
         """Free the name planned for a withdrawn item (caller holds _take_lock)."""
-        output = self._planned_outputs.pop(item.id, None)
-        source = _key(item.path)
-        if output is None or any(_key(i.path) == source for i in self._items):
-            return  # nothing planned, or the same file is still in the batch
+        planned = self._planned_outputs.pop(item.id, None)
+        if planned is None:
+            return
+        output, source = planned
+        self._planned_sources[source] -= 1
+        if self._planned_sources[source] > 0:
+            return  # the same file is still in the batch
         with self._claims_lock:
             if self._claims.get(output) == source:
                 del self._claims[output]

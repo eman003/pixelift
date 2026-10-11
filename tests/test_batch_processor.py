@@ -218,28 +218,51 @@ def test_finished_items_outside_batch_keep_their_output(image_factory):
     assert second.result.output.name == "photo_2x (2).png"
 
 
+class GatedUpscaler(FakeUpscaler):
+    """Holds every job at the start until ``gate`` is set; ``started`` fires first."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = threading.Event()
+        self.started = threading.Event()
+
+    def upscale(self, image, scale, model, **kwargs):
+        self.started.set()
+        assert self.gate.wait(10)
+        return super().upscale(image, scale, model, **kwargs)
+
+
 def test_withdraw_queued_item(image_factory):
     items = make_items(image_factory, 3)
-    up = FakeUpscaler(delay=0.05)
-    proc = BatchProcessor(up, ProcessingOptions(scale=2), workers=1)
+    events = []
+    up = GatedUpscaler()
+    proc = BatchProcessor(up, ProcessingOptions(scale=2), events.append, workers=1)
     proc.start(items)
+    assert up.started.wait(10)  # items[0] is running; the others wait
+    items[2].progress = 0.5  # stale state a withdrawal must clear
     assert proc.withdraw(items[2])
-    assert items[2].status is ItemStatus.PENDING
+    assert items[2].status is ItemStatus.PENDING and items[2].progress == 0.0
     assert not proc.withdraw(items[2])  # already out
+    withdrawn = [e for e in events if e.kind is EventKind.ITEM_WITHDRAWN]
+    assert [e.item for e in withdrawn] == [items[2]] and withdrawn[0].total == 2
+    up.gate.set()
     proc.wait(10)
     assert proc.summary.total == 2 and proc.summary.done == 2
     assert items[2].status is ItemStatus.PENDING and items[2].result is None
     assert up.calls == 2
+    finished = [e.item for e in events if e.kind is EventKind.ITEM_FINISHED]
+    assert items[2] not in finished
 
 
 def test_cannot_withdraw_started_item(image_factory):
     items = make_items(image_factory, 2)
-    proc = BatchProcessor(FakeUpscaler(delay=0.05), ProcessingOptions(scale=2), workers=1)
+    up = GatedUpscaler()
+    proc = BatchProcessor(up, ProcessingOptions(scale=2), workers=1)
     proc.start(items)
-    deadline = time.monotonic() + 5
-    while items[0].status is not ItemStatus.PROCESSING and time.monotonic() < deadline:
-        time.sleep(0.005)
+    assert up.started.wait(10)
+    assert items[0].status is ItemStatus.PROCESSING
     assert not proc.withdraw(items[0])
+    up.gate.set()
     proc.wait(10)
     assert items[0].status is ItemStatus.DONE
 
@@ -247,11 +270,49 @@ def test_cannot_withdraw_started_item(image_factory):
 def test_withdrawn_item_frees_its_output_name(image_factory):
     first = QueueItem(image_factory("img0.png"))
     jpg, png = QueueItem(image_factory("photo.jpg")), QueueItem(image_factory("photo.png"))
-    proc = BatchProcessor(FakeUpscaler(delay=0.05), ProcessingOptions(scale=2), workers=1)
+    up = GatedUpscaler()
+    proc = BatchProcessor(up, ProcessingOptions(scale=2), workers=1)
     proc.start([first, jpg, png])
-    deadline = time.monotonic() + 5
-    while first.status is not ItemStatus.PROCESSING and time.monotonic() < deadline:
-        time.sleep(0.005)  # names are planned before the first job starts
+    assert up.started.wait(10)  # names are planned before the first job starts
     assert proc.withdraw(jpg)
+    up.gate.set()
     proc.wait(10)
     assert png.result.output.name == "photo_2x.png"
+
+
+def test_item_withdrawn_while_planning_reserves_no_name(image_factory, monkeypatch):
+    from pixelift.core import batch_processor as bp
+
+    probe = bp.probe_image
+    planning, resume = threading.Event(), threading.Event()
+
+    def held_probe(path):
+        if path.name == "img0.png":
+            planning.set()
+            assert resume.wait(10)
+        return probe(path)
+
+    monkeypatch.setattr(bp, "probe_image", held_probe)
+    first = QueueItem(image_factory("img0.png"))
+    jpg, png = QueueItem(image_factory("photo.jpg")), QueueItem(image_factory("photo.png"))
+    proc = BatchProcessor(FakeUpscaler(), ProcessingOptions(scale=2), workers=1)
+    proc.start([first, jpg, png])
+    assert planning.wait(10)
+    assert proc.withdraw(jpg)  # does not wait for planning to finish
+    resume.set()
+    proc.wait(10)
+    assert png.result.output.name == "photo_2x.png"
+
+
+def test_withdrawing_a_duplicate_keeps_the_name_for_the_other(image_factory):
+    first = QueueItem(image_factory("img0.png"))
+    path = image_factory("photo.png")
+    a, b = QueueItem(path), QueueItem(path)
+    up = GatedUpscaler()
+    proc = BatchProcessor(up, ProcessingOptions(scale=2), workers=1)
+    proc.start([first, a, b])
+    assert up.started.wait(10)
+    assert proc.withdraw(a)
+    up.gate.set()
+    proc.wait(10)
+    assert b.result.output.name == "photo_2x.png"

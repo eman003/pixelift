@@ -11,6 +11,28 @@ from PIL import Image
 log = logging.getLogger(__name__)
 
 ORIENTATION_TAG = 0x0112
+# A TIFF's EXIF is its first image directory, which also describes the pixel
+# layout (size, strips, compression…). Only these descriptive tags carry over.
+TIFF_DESCRIPTIVE_TAGS = frozenset(
+    {
+        0x010D,  # DocumentName
+        0x010E,  # ImageDescription
+        0x010F,  # Make
+        0x0110,  # Model
+        ORIENTATION_TAG,
+        0x011A,  # XResolution
+        0x011B,  # YResolution
+        0x011D,  # PageName
+        0x0128,  # ResolutionUnit
+        0x0131,  # Software
+        0x0132,  # DateTime
+        0x013B,  # Artist
+        0x013C,  # HostComputer
+        0x8298,  # Copyright
+        0x8769,  # Exif IFD
+        0x8825,  # GPS IFD
+    }
+)
 
 
 @dataclass
@@ -27,15 +49,21 @@ class ImageMetadata:
 
 
 def extract_metadata(img: Image.Image) -> ImageMetadata:
-    """Read metadata from an image whose pixels are already EXIF-transposed.
+    """Read metadata from a freshly opened image (before EXIF-transposing it:
+    the transposed copy of some formats, such as TIFF, has no EXIF).
 
-    The orientation tag is forced to 1 ("normal") because the pixels were
+    The orientation tag is forced to 1 ("normal") because the pixels are
     physically rotated on load; keeping the old value would rotate the output
-    a second time in viewers.
+    a second time in viewers. The image's own EXIF is left untouched, so
+    ``exif_transpose`` still sees the original orientation.
     """
     meta = ImageMetadata()
     try:
-        exif = img.getexif()
+        exif = Image.Exif()
+        exif.load(img.getexif().tobytes())
+        if img.format == "TIFF":
+            for tag in [t for t in exif if t not in TIFF_DESCRIPTIVE_TAGS]:
+                del exif[tag]
         if len(exif):
             if ORIENTATION_TAG in exif:
                 exif[ORIENTATION_TAG] = 1

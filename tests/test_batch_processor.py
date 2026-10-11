@@ -316,3 +316,19 @@ def test_withdrawing_a_duplicate_keeps_the_name_for_the_other(image_factory):
     up.gate.set()
     proc.wait(10)
     assert b.result.output.name == "photo_2x.png"
+
+
+def test_batch_never_overwrites_another_queued_original(image_factory, tmp_path):
+    """photo.jpg -> photo.png must not replace the queued photo.png itself."""
+    jpg = image_factory("photo.jpg")
+    png = image_factory("photo.png")
+    original = png.read_bytes()
+    items = [QueueItem(jpg), QueueItem(png)]
+    options = ProcessingOptions(
+        scale=2, output_dir=jpg.parent, filename_template="{name}", existing="overwrite"
+    )
+    summary = BatchProcessor(FakeUpscaler(), options, lambda _e: None).run(items)
+    assert summary.done == 2
+    assert png.read_bytes() == original
+    outputs = {i.result.output for i in items}
+    assert png not in outputs and jpg not in outputs and len(outputs) == 2

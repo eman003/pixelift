@@ -152,10 +152,8 @@ def load_image(path: Path) -> LoadedImage:
                 f"{path.name} could not be decoded. The file may be truncated or damaged."
             ) from exc
         source_format = img.format or ""
-        # Transpose first: reading metadata resets the orientation tag on the
-        # image's cached EXIF, which would make exif_transpose a no-op.
-        img = ImageOps.exif_transpose(img) or img
         metadata = extract_metadata(img)
+        img = ImageOps.exif_transpose(img) or img
         img = _to_8bit(img)
 
         if img.mode == "P":

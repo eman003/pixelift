@@ -28,6 +28,14 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.8.0" date="2026-10-11">
+      <description>
+        <p>A new Remove location option leaves GPS coordinates out of copied metadata.
+          Oversized images are refused instead of exhausting memory, AI models are
+          checksum-verified before every load, and the bundled libraries are updated
+          and pinned.</p>
+      </description>
+    </release>
     <release version="1.7.5" date="2026-10-11">
       <description>
         <p>Finished photos are redone after changing the scale, model or file settings,

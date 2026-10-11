@@ -4,6 +4,20 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.4] - 2026-10-11
+
+### Fixed
+
+- Clicking remove on a waiting photo just as it starts processing shows a
+  message instead of silently doing nothing.
+- Removing photos from a large running batch no longer briefly holds up the
+  workers.
+
+### Changed
+
+- Batch listeners get a dedicated "withdrawn" event when a waiting photo is
+  removed, instead of an item-less "finished" event.
+
 ## [1.7.3] - 2026-10-11
 
 ### Fixed

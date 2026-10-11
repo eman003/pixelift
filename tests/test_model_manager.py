@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import types
+from pathlib import Path
 
 import pytest
 
@@ -122,3 +124,58 @@ def test_install_manual_file(tmp_path, tiny_specs, models_dir):
     other.write_bytes(b"wrong")
     with pytest.raises(ModelDownloadError):
         mgr.install_file(spec, other)
+
+
+def test_download_dropped_connection_is_a_download_error(tmp_path, tiny_specs, monkeypatch):
+    import http.client
+    import urllib.request
+
+    class Dropping:
+        headers = types.MappingProxyType({})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _n):
+            raise http.client.IncompleteRead(b"partial", 100)
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Dropping())
+    mgr = ModelManager(tmp_path / "dl", [tiny_specs["x4"]])
+    with pytest.raises(ModelDownloadError, match="Could not download"):
+        mgr.download(tiny_specs["x4"])
+    assert not list((tmp_path / "dl").iterdir())
+
+
+def test_install_manual_file_is_atomic(tmp_path, tiny_specs, models_dir, monkeypatch):
+    import shutil
+
+    spec = tiny_specs["x4"]
+    mgr = ModelManager(tmp_path / "manual", [spec])
+
+    def interrupted(_src, dst):
+        Path(dst).write_bytes(b"trunc")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(shutil, "copyfile", interrupted)
+    with pytest.raises(ModelDownloadError, match="disk space"):
+        mgr.install_file(spec, models_dir / spec.filename)
+    assert not mgr.is_installed(spec)
+    assert not list((tmp_path / "manual").iterdir())
+
+
+def test_stale_partial_downloads_are_removed(tmp_path, tiny_specs):
+    import os
+    import time
+
+    folder = tmp_path / "dl"
+    folder.mkdir()
+    old, fresh = folder / ".download-old", folder / ".download-fresh"
+    old.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    long_ago = time.time() - 24 * 3600
+    os.utime(old, (long_ago, long_ago))
+    ModelManager(folder, [tiny_specs["x4"]])
+    assert not old.exists() and fresh.exists()  # a running download may own it

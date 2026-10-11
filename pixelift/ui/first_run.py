@@ -12,7 +12,7 @@ from pixelift.core import device_manager as dm
 from pixelift.core.errors import UpscalerError, friendly_error
 from pixelift.core.image_processor import test_pattern
 from pixelift.core.upscaler import TorchUpscaler
-from pixelift.models import get_spec
+from pixelift.models import UPSCALE, ModelSpec, get_spec
 from pixelift.models.realesrgan import RECOMMENDED_CPU_MODEL, RECOMMENDED_MODEL
 from pixelift.ui.async_utils import run_in_thread
 from pixelift.ui.widgets.model_row import ModelRow
@@ -117,7 +117,8 @@ class FirstRunDialog(Adw.Dialog):
         self.models_next.connect("clicked", lambda _b: self._show_test())
         box.append(self._footer(skip, self.models_next))
         self.stack.add_named(box, "models")
-        self.app.downloads.subscribe(lambda *_: self._update_models_next())
+        unsubscribe = self.app.downloads.subscribe(lambda *_: self._update_models_next())
+        self.connect("closed", lambda _d: unsubscribe())
 
     def _show_models(self) -> None:
         device = self.app.selected_device()
@@ -141,8 +142,12 @@ class FirstRunDialog(Adw.Dialog):
         self._update_models_next()
         self.stack.set_visible_child_name("models")
 
+    def _installed_upscalers(self) -> list[ModelSpec]:
+        """Installed upscaling models (restoration models cannot upscale)."""
+        return [s for s in self.app.model_manager.installed() if s.kind == UPSCALE]
+
     def _update_models_next(self) -> None:
-        installed = bool(self.app.model_manager.installed())
+        installed = bool(self._installed_upscalers())
         self.models_next.set_sensitive(installed)
         self.models_next.set_tooltip_text(None if installed else "Download a model first")
 
@@ -165,7 +170,7 @@ class FirstRunDialog(Adw.Dialog):
         self.stack.set_visible_child_name("test")
         manager = self.app.model_manager
         device = self.app.selected_device()
-        installed = manager.installed()
+        installed = self._installed_upscalers()
         settings = self.app.settings
         try:
             spec = manager.resolve(settings.model, settings.scale)

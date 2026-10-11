@@ -19,6 +19,7 @@ class DownloadState:
     active: bool = True
     error: UpscalerError | None = None
     control: JobControl | None = None
+    removed: bool = False  # the model was removed while downloading
 
     @property
     def fraction(self) -> float:
@@ -57,15 +58,21 @@ class DownloadTracker:
             state.done, state.total = done, total
             idle(self._notify, model_id)
 
+        def forget() -> None:
+            if self.states.get(model_id) is state:  # not a newer download's state
+                del self.states[model_id]
+
         def finished(_path: object) -> None:
-            self.states.pop(model_id, None)
+            if state.removed:  # removed just after the last block arrived
+                self.manager.remove(model_id)
+            forget()
             self._notify(model_id)
 
         def failed(exc: BaseException) -> None:
             state.active = False
             if isinstance(exc, CancelledError):
-                self.states.pop(model_id, None)
-            else:
+                forget()
+            elif self.states.get(model_id) is state:
                 state.error = friendly_error(exc)
             self._notify(model_id)
 
@@ -86,6 +93,10 @@ class DownloadTracker:
             state.control.cancel()
 
     def remove(self, model_id: str) -> None:
+        state = self.states.get(model_id)
+        if state and state.active:
+            state.removed = True  # a running download would install it again
+            self.cancel(model_id)
         self.manager.remove(model_id)
         self.states.pop(model_id, None)
         self._notify(model_id)

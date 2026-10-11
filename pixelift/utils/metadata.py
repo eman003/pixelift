@@ -82,10 +82,31 @@ def extract_metadata(img: Image.Image) -> ImageMetadata:
     return meta
 
 
+JPEG_MAX_EXIF = 65533  # bytes in one APP1 segment; Pillow refuses more
+
+
+def icc_matches_mode(icc: bytes, mode: str) -> bool:
+    """Whether an ICC profile describes ``mode``'s colour space.
+
+    Restoring can turn a colour scan grey and colorizing a grey one colour; a
+    profile for the other colour space would be invalid in the output.
+    """
+    space = icc[16:20]  # the profile header's data colour space
+    if mode in ("L", "LA", "1"):
+        return space == b"GRAY"
+    if mode in ("RGB", "RGBA"):
+        return space == b"RGB "
+    return False
+
+
 def save_kwargs(
-    fmt: str, meta: ImageMetadata | None, quality: int, scale: int = 1
+    fmt: str, meta: ImageMetadata | None, quality: int, scale: int = 1, mode: str | None = None
 ) -> dict[str, Any]:
-    """Pillow ``save`` keyword arguments for ``fmt`` including metadata."""
+    """Pillow ``save`` keyword arguments for ``fmt`` including metadata.
+
+    ``mode`` is the output image's mode; an ICC profile for another colour
+    space is left out.
+    """
     kwargs: dict[str, Any] = {}
     if fmt == "JPEG":
         kwargs.update(quality=quality, optimize=True, subsampling=0 if quality >= 90 else 2)
@@ -95,9 +116,15 @@ def save_kwargs(
         kwargs.update(compress_level=6)
     if meta is not None:
         if meta.exif:
-            kwargs["exif"] = meta.exif
+            if fmt == "JPEG" and len(meta.exif) > JPEG_MAX_EXIF:
+                log.warning("EXIF data too large for JPEG (%d bytes); not copied", len(meta.exif))
+            else:
+                kwargs["exif"] = meta.exif
         if meta.icc_profile:
-            kwargs["icc_profile"] = meta.icc_profile
+            if mode is None or icc_matches_mode(meta.icc_profile, mode):
+                kwargs["icc_profile"] = meta.icc_profile
+            else:
+                log.info("Not copying the ICC profile: it does not match the %s output", mode)
         dpi = meta.scaled_dpi(scale)
         if dpi and fmt in ("JPEG", "PNG"):
             kwargs["dpi"] = dpi

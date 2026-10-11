@@ -4,6 +4,48 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.5] - 2026-10-11
+
+### Fixed
+
+- Changing the scale, AI model, format, quality, output folder or filename
+  template queues finished photos again, instead of leaving them marked done
+  with the old result.
+- Settings changed while a batch runs are checked against its results when it
+  finishes, so photos made with the old settings can be redone.
+- EXIF data from TIFF photos is kept in the result.
+- A result is never written over another queued photo's original (for example
+  `photo.jpg` → `photo.png` next to a queued `photo.png`).
+- The app icon shows when Pixelift is installed with pip.
+- Removing a model while it downloads stops the download instead of
+  reinstalling the model.
+- A dropped connection or a full disk while downloading a model shows a clear
+  download error. Interrupted model installs no longer leave a broken file
+  that looks installed, and leftover partial downloads are cleaned up.
+- The Setup Assistant only tests with an upscaling model, and model rows keep
+  showing download progress after a dialog changes layout.
+- Colour profiles that don't match the result (a colour profile on a now-grey
+  photo, or the reverse) are left out, and EXIF data too large for JPEG no
+  longer makes saving fail.
+- The launcher no longer loads Python modules from the folder it is started
+  in.
+- Invalid filename templates are reported straight away instead of failing
+  every photo; a broken saved template is reset.
+- A settings file that isn't a JSON object no longer stops Pixelift starting.
+- `pixelift --remove-model` with an unknown model says so instead of crashing.
+- Restoration models can no longer be chosen as upscalers.
+- The free disk space check no longer refuses JPEG and WebP jobs that fit.
+- With a GPU memory limit set, tiles are sized to fit within it from the start.
+- LAB TIFF photos load with correct colours.
+- A preview that can't start the AI engine shows an error; a stage preview
+  that failed to load is tried again; removing a photo just after cancelling
+  works.
+- Photos removed while a start was pending are not processed.
+- "Try Again" after a failed startup no longer registers keyboard shortcuts
+  and listeners twice.
+- `pixelift-gui photo.jpg` opens the photo.
+- The .deb and AppStream metadata point to the Pixelift homepage.
+
 ## [1.7.4] - 2026-10-11
 
 ### Fixed

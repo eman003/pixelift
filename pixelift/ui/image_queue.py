@@ -205,7 +205,7 @@ class QueueRow(Gtk.ListBoxRow):
         if status in _STATUS_CLASSES:
             self.status.add_css_class(_STATUS_CLASSES[status])
 
-        busy = status in (ItemStatus.PROCESSING, ItemStatus.QUEUED)
+        busy = status is ItemStatus.PROCESSING  # queued rows can still be withdrawn
         self.progress.set_visible(status is ItemStatus.PROCESSING)
         self.progress.set_fraction(item.progress)
         has_output = bool(item.result and item.result.output.exists())

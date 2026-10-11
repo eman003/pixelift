@@ -4,6 +4,14 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.2] - 2026-10-11
+
+### Fixed
+
+- Photos still waiting in a running batch can be removed from the queue; the
+  batch skips them and its totals update. A photo that is already being
+  processed still can't be removed.
+
 ## [1.7.1] - 2026-10-08
 
 ### Fixed

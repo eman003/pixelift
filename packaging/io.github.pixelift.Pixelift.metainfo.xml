@@ -26,6 +26,11 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.7.2" date="2026-10-11">
+      <description>
+        <p>Photos waiting in a running batch can be removed from the queue again.</p>
+      </description>
+    </release>
     <release version="1.7.1" date="2026-10-08">
       <description>
         <p>Fixes for the on-photo comparison: small photos zoom to 100 % again, the

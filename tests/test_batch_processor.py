@@ -216,3 +216,29 @@ def test_finished_items_outside_batch_keep_their_output(image_factory):
     proc.wait()
     assert second.status is ItemStatus.DONE
     assert second.result.output.name == "photo_2x (2).png"
+
+
+def test_withdraw_queued_item(image_factory):
+    items = make_items(image_factory, 3)
+    up = FakeUpscaler(delay=0.05)
+    proc = BatchProcessor(up, ProcessingOptions(scale=2), workers=1)
+    proc.start(items)
+    assert proc.withdraw(items[2])
+    assert items[2].status is ItemStatus.PENDING
+    assert not proc.withdraw(items[2])  # already out
+    proc.wait(10)
+    assert proc.summary.total == 2 and proc.summary.done == 2
+    assert items[2].status is ItemStatus.PENDING and items[2].result is None
+    assert up.calls == 2
+
+
+def test_cannot_withdraw_started_item(image_factory):
+    items = make_items(image_factory, 2)
+    proc = BatchProcessor(FakeUpscaler(delay=0.05), ProcessingOptions(scale=2), workers=1)
+    proc.start(items)
+    deadline = time.monotonic() + 5
+    while items[0].status is not ItemStatus.PROCESSING and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert not proc.withdraw(items[0])
+    proc.wait(10)
+    assert items[0].status is ItemStatus.DONE

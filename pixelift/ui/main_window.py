@@ -1413,8 +1413,12 @@ class MainWindow(Adw.ApplicationWindow):
             self._after_removal()
 
     def _remove(self, row: QueueRow) -> bool:
-        if row.item.status in (ItemStatus.PROCESSING, ItemStatus.QUEUED):
+        if row.item.status is ItemStatus.PROCESSING:
             return False
+        if row.item.status is ItemStatus.QUEUED and not (
+            self.processor and self.processor.withdraw(row.item)
+        ):
+            return False  # a worker picked it up just now
         self.rows.remove(row)
         self.listbox.remove(row)
         return True

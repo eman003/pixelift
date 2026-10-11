@@ -133,6 +133,7 @@ class BatchProcessor:
         self._items: list[QueueItem] = []
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
+        self._take_lock = threading.Lock()  # hands items to workers; never held long
         self._finished = threading.Event()
         self._started_at = 0.0
         self._remaining = 0
@@ -167,6 +168,20 @@ class BatchProcessor:
 
     def cancel(self) -> None:
         self.control.cancel()
+
+    def withdraw(self, item: QueueItem) -> bool:
+        """Take an item that has not started yet out of the running batch.
+
+        Returns False once a worker has picked it up (or it is not queued here).
+        """
+        with self._take_lock:
+            if item.status is not ItemStatus.QUEUED or item not in self._items:
+                return False
+            item.status = ItemStatus.PENDING
+            # A new list: overall() and _finish() read it without the lock.
+            self._items = [i for i in self._items if i is not item]
+        self._emit(EventKind.ITEM_FINISHED)  # the totals changed
+        return True
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._finished.wait(timeout)
@@ -219,8 +234,12 @@ class BatchProcessor:
                     item = work.get_nowait()
                 except queue.Empty:
                     break
-                if self.control.cancelled:
-                    item.status = ItemStatus.CANCELLED
+                with self._take_lock:
+                    if item.status is not ItemStatus.QUEUED:
+                        continue  # withdrawn while waiting
+                    cancelled = self.control.cancelled
+                    item.status = ItemStatus.CANCELLED if cancelled else ItemStatus.PROCESSING
+                if cancelled:
                     self._emit(EventKind.ITEM_FINISHED, item)
                     continue
                 self._process(item)

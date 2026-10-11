@@ -19,7 +19,7 @@ from pathlib import Path
 from pixelift import __version__
 from pixelift.core.control import JobControl
 from pixelift.core.errors import ModelDownloadError, ModelNotInstalledError
-from pixelift.models import ModelSpec, all_specs, candidate_specs, get_spec
+from pixelift.models import UPSCALE, ModelSpec, all_specs, candidate_specs, get_spec
 from pixelift.storage import paths
 
 log = logging.getLogger(__name__)
@@ -97,6 +97,8 @@ class ModelManager:
             candidates = (
                 [self._specs[model]] if model in self._specs else candidate_specs(model, scale)
             )
+            if any(s.kind != UPSCALE for s in candidates):
+                raise KeyError(model)  # a restoration model cannot upscale
         except KeyError:
             raise ModelNotInstalledError(
                 f"“{model}” is not a known model.",

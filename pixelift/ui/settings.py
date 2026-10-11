@@ -11,7 +11,7 @@ from pixelift.core import device_manager as dm
 from pixelift.models import KIND_LABELS, UPSCALE, all_families
 from pixelift.ui.widgets.model_row import ModelRow
 from pixelift.utils import system
-from pixelift.utils.image_utils import render_filename
+from pixelift.utils.image_utils import check_template, render_filename
 
 if TYPE_CHECKING:
     from pixelift.ui.application import UpscalerApplication
@@ -229,8 +229,8 @@ class PreferencesDialog(Adw.PreferencesDialog):
     def _on_template_changed(self, row: Adw.EntryRow) -> None:
         text = row.get_text()
         try:
-            render_filename(text, Path("photo.jpg"), 4, "realesrgan", 7680, 4320, ".png")
-        except (ValueError, IndexError, KeyError):
+            check_template(text)
+        except ValueError:
             row.add_css_class("error")
             self.template_hint.set_title(
                 "Unknown field — use {name} {scale} {model} {width} {height} {ext} {lighting} "

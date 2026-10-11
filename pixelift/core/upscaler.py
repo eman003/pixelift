@@ -251,6 +251,24 @@ class TorchUpscaler(Upscaler):
                 if release and device.is_gpu:
                     dm.empty_cache(device)
 
+    def _gpu_free_memory(self, device: dm.DeviceInfo) -> int:
+        """Free memory on ``device``, within the user's memory limit.
+
+        ``mem_get_info`` reports the whole card; the per-process limit set in
+        _apply_memory_limit is invisible to it.
+        """
+        free = dm.free_memory(device)
+        limited = device.kind == "cuda" and device.id in _limited_cuda_devices
+        if limited and self.memory_limit_mb > 0:
+            import torch
+
+            try:
+                used = torch.cuda.memory_allocated(torch.device(device.id))
+            except Exception:  # noqa: BLE001 - best effort
+                used = 0
+            free = min(free, max(0, self.memory_limit_mb * 1024**2 - used))
+        return free
+
     def choose_tile_size(
         self, spec: ModelSpec, height: int, width: int, device: dm.DeviceInfo
     ) -> int:
@@ -258,7 +276,7 @@ class TorchUpscaler(Upscaler):
             return self.tile_size
         bytes_per_px = spec.memory_per_pixel * (0.5 if _uses_half(device) else 1.0)
         if device.is_gpu:
-            budget = int(dm.free_memory(device) * 0.6)
+            budget = int(self._gpu_free_memory(device) * 0.6)
             cap = 1024
         else:
             budget = int(min(dm.free_memory(device) * 0.3, 3 * 1024**3))

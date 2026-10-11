@@ -101,6 +101,7 @@ class MainWindow(Adw.ApplicationWindow):
         # The stage: the selected photo (or its result), with the look previewed live.
         self._stage_row: QueueRow | None = None
         self._stage_source: Path | None = None  # the file the stage shows
+        self._stage_failed = False  # the shown photo could not be loaded
         self._stage_base: Image.Image | None = None  # the original, for looks and restoring
         self._stage_is_output = False
         self._stage_shown_look: tuple | None = None  # what the after side renders
@@ -122,6 +123,9 @@ class MainWindow(Adw.ApplicationWindow):
         self._device_wait_over = False
         self._pending_paths: list[Path] = []
         self._ready_callbacks: list[Callable[[], None]] = []
+        # Undoes what a build attempt registered outside its own widgets, so
+        # "Try Again" after a failed startup does not register it all twice.
+        self._attempt_undo: list[Callable[[], None]] = []
 
         self.startup = StartupScreen(on_retry=self._retry_startup, on_exit=self._exit_startup)
         self.root = Gtk.Stack(
@@ -177,6 +181,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_built(self) -> None:
         self._built = True
+        self._attempt_undo = []
         if not self._devices_known:
             self.startup.set_status(STATUS_DEVICE)
             # Device detection runs in the background; never hold the window for it long.
@@ -235,6 +240,9 @@ class MainWindow(Adw.ApplicationWindow):
         """Build the workspace in steps; a frame is drawn between them, so the
         startup animation keeps moving (the look gallery alone takes ~0.1 s)."""
         app = self.app
+        undo, self._attempt_undo = self._attempt_undo, []
+        for callback in reversed(undo):  # a failed earlier attempt
+            callback()
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(self._build_header())
         self.toasts = Adw.ToastOverlay()
@@ -246,10 +254,13 @@ class MainWindow(Adw.ApplicationWindow):
         toolbar.set_content(self.toasts)
         yield
         self.lighting = LightingControls(app)
+        self._attempt_undo.append(self.lighting.shutdown)
         yield
         self.camera_look = CameraLookControls(app)
+        self._attempt_undo.append(self.camera_look.shutdown)
         yield
         self.preset_panel = PresetPanel(app)
+        self._attempt_undo.append(self.preset_panel.shutdown)
         yield
         toolbar.add_bottom_bar(self._build_controls())
         toolbar.set_bottom_bar_style(Adw.ToolbarStyle.RAISED)
@@ -264,6 +275,7 @@ class MainWindow(Adw.ApplicationWindow):
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self._on_key)
         self.add_controller(keys)
+        self._attempt_undo.append(lambda: self.remove_controller(keys))
 
         # The sidebar floats over the stage on smaller windows; on narrow ones
         # the controls stack vertically too. (Only the last matching applies.)
@@ -293,7 +305,13 @@ class MainWindow(Adw.ApplicationWindow):
         app.on_settings_changed(self._sync_from_settings)
         app.on_lighting_changed(self._reset_stale)
         app.on_lighting_changed(self._on_look_changed)
-        app.downloads.subscribe(lambda *_: self._refresh_model_list())
+        unsubscribe = app.downloads.subscribe(lambda *_: self._refresh_model_list())
+        self._attempt_undo += [
+            lambda: app.off_settings_changed(self._sync_from_settings),
+            lambda: app.off_lighting_changed(self._reset_stale),
+            lambda: app.off_lighting_changed(self._on_look_changed),
+            unsubscribe,
+        ]
         app.when_devices_ready(self._on_devices)
         self._sync_from_settings()
         self._on_look_changed()
@@ -582,6 +600,9 @@ class MainWindow(Adw.ApplicationWindow):
 
         # Enhance: what happens to the photo (restoration, scale, AI model).
         self.restore_panel = RestorationPanel(self.app, self.show_restoration_options)
+        self._attempt_undo.append(
+            lambda p=self.restore_panel: self.app.off_settings_changed(p.sync)
+        )
         self.scale_buttons = self._segmented([f"{s}×" for s in SCALES], self._on_scale_selected)
         self.model_list = Gtk.StringList()
         self.model_dd = Gtk.DropDown(model=self.model_list)
@@ -1000,6 +1021,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._drop_restore_preview()
         if row is None or not row.ready:
             self._stage_source = None
+            self._stage_failed = False
             self._stage_base = None
             self._stage_generation += 1
             self._drop_restore_preview()
@@ -1011,6 +1033,7 @@ class MainWindow(Adw.ApplicationWindow):
         target, is_output = self._stage_target(row)
         if target != self._stage_source:
             self._stage_source = target
+            self._stage_failed = False
             self._stage_base = None
             self._stage_shown_look = None
             self._stage_generation += 1
@@ -1055,8 +1078,11 @@ class MainWindow(Adw.ApplicationWindow):
             def failed(exc: BaseException) -> None:
                 if generation == self._stage_generation:
                     self.stage_spinner.set_spinning(False)
-                    self.stage_badge.set_label("Preview Unavailable")
-                    self.stage_badge.remove_css_class("finished")
+                    # Load again next time (the file may still have been
+                    # written, or a network folder hiccuped).
+                    self._stage_source = None
+                    self._stage_failed = True
+                    self._update_stage_overlays()
                     log.warning("Stage preview failed: %s", exc)
 
             run_in_thread(load, on_done=done, on_error=failed, name="stage")
@@ -1183,6 +1209,9 @@ class MainWindow(Adw.ApplicationWindow):
         except UpscalerError as err:
             show_error(self, err)
             return
+        except Exception as exc:  # noqa: BLE001 - torch or the GPU driver failed to start
+            self._engine_failed(exc)
+            return
         import numpy as np
 
         rgb = np.array(base.convert("RGB"))
@@ -1282,8 +1311,11 @@ class MainWindow(Adw.ApplicationWindow):
         view.before_label = "Original Scan" if restored else "Original"
         view.after_label = after_label
         view.queue_draw()
-        self.stage_badge.set_label(after_label if has_after else "Original")
-        if is_output:
+        if self._stage_failed:
+            self.stage_badge.set_label("Preview Unavailable")
+        else:
+            self.stage_badge.set_label(after_label if has_after else "Original")
+        if is_output and not self._stage_failed:
             self.stage_badge.add_css_class("finished")
         else:
             self.stage_badge.remove_css_class("finished")
@@ -1423,10 +1455,13 @@ class MainWindow(Adw.ApplicationWindow):
     def _remove(self, row: QueueRow) -> bool:
         if row.item.status is ItemStatus.PROCESSING:
             return False
-        if row.item.status is ItemStatus.QUEUED and not (
+        withdrawn = row.item.status is not ItemStatus.QUEUED or bool(
             self.processor and self.processor.withdraw(row.item)
-        ):
-            return False  # a worker picked it up just now
+        )
+        # A failed withdrawal means a worker picked it up just now, unless it
+        # was cancelled (or finished) in between: then it can simply go.
+        if not withdrawn and row.item.status in (ItemStatus.QUEUED, ItemStatus.PROCESSING):
+            return False
         self.rows.remove(row)
         self.listbox.remove(row)
         return True
@@ -1555,7 +1590,8 @@ class MainWindow(Adw.ApplicationWindow):
         options = settings.processing_options()
         if options.restoration is not None and without:
             options.restoration = _without_models(options.restoration, without)
-        candidates = rows if rows is not None else self.rows
+        # ``rows`` may come from a deferred start: skip rows removed since.
+        candidates = [r for r in rows if r in self.rows] if rows is not None else self.rows
         todo = [
             r
             for r in candidates
@@ -1592,15 +1628,8 @@ class MainWindow(Adw.ApplicationWindow):
 
         try:
             upscaler = self._get_upscaler()
-        except Exception as exc:
-            log.exception("Could not create upscaler")
-            show_error(
-                self,
-                UpscalerError(
-                    f"The AI engine could not start: {exc}",
-                    ["Switch the processing device to CPU in Settings"],
-                ),
-            )
+        except Exception as exc:  # noqa: BLE001 - logged and shown by _engine_failed
+            self._engine_failed(exc)
             return
         workers = settings.concurrent_jobs or dm.recommended_concurrency(upscaler.device)
         self.processor = BatchProcessor(
@@ -1614,6 +1643,16 @@ class MainWindow(Adw.ApplicationWindow):
         )
         self.processor.start([r.item for r in todo], others=[r.item for r in self.rows])
         self._update_state()
+
+    def _engine_failed(self, exc: Exception) -> None:
+        log.exception("Could not create upscaler", exc_info=exc)
+        show_error(
+            self,
+            UpscalerError(
+                f"The AI engine could not start: {exc}",
+                ["Switch the processing device to CPU in Settings"],
+            ),
+        )
 
     def _restoration_models_ready(
         self,

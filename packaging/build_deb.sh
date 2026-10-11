@@ -24,7 +24,7 @@ Depends: python3 (>= $PYVER), python3 (<< $PYNEXT), python3-gi (>= 3.42), gir1.2
 Recommends: python3-pip
 Installed-Size: $SIZE_KB
 Maintainer: Pixelift contributors <noreply@example.com>
-Homepage: https://github.com/xinntao/Real-ESRGAN
+Homepage: https://github.com/eman003/pixelift
 Description: Local AI image upscaler and photo restorer (Real-ESRGAN, GTK4)
  Upscale images 2x or 4x with Real-ESRGAN super-resolution, and restore old
  photographs: dust, scratches, fading, colour casts and faces, with optional

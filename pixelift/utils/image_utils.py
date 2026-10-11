@@ -129,7 +129,15 @@ def probe_image(path: Path) -> ImageInfo:
 
 
 def _to_8bit(img: Image.Image) -> Image.Image:
-    """Convert 16/32-bit integer and float modes to 8-bit by scaling, not clipping."""
+    """Convert 16/32-bit integer and float modes to 8-bit by scaling, not clipping,
+    and CIELAB to sRGB (a plain ``convert`` reinterprets L*a*b* as RGB)."""
+    if img.mode == "LAB":
+        from PIL import ImageCms
+
+        transform = ImageCms.buildTransform(
+            ImageCms.createProfile("LAB"), ImageCms.createProfile("sRGB"), "LAB", "RGB"
+        )
+        return ImageCms.applyTransform(img, transform)
     if img.mode in ("I;16", "I;16L", "I;16B", "I;16N", "I"):
         arr = np.asarray(img, dtype=np.uint32)
         shift = 8 if img.mode.startswith("I;16") or arr.max(initial=0) > 255 else 0
@@ -256,6 +264,15 @@ def render_filename(
         template += "_{look}"
     stem = _FIELD_RE.sub("_", template.format(**values)).strip(". ") or source.stem
     return stem + ext
+
+
+def check_template(template: str) -> None:
+    """Raise ValueError if ``template`` cannot name a file (unknown field,
+    unbalanced braces…), before a whole batch fails on it."""
+    try:
+        render_filename(template, Path("photo.jpg"), 4, "realesrgan", 7680, 4320, ".png")
+    except (ValueError, IndexError, KeyError, AttributeError) as exc:
+        raise ValueError(f"invalid filename template {template!r}: {exc}") from None
 
 
 def numbered_paths(path: Path) -> Iterator[Path]:

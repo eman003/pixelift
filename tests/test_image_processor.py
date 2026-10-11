@@ -320,3 +320,23 @@ def test_oversized_exif_is_left_out_of_jpeg():
     meta = ImageMetadata(exif=b"x" * 70000)
     assert "exif" not in save_kwargs("JPEG", meta, 90)
     assert save_kwargs("PNG", meta, 90)["exif"] == meta.exif
+
+
+def test_lab_tiff_is_converted_to_srgb(tmp_path):
+    from pixelift.utils.image_utils import load_image
+
+    path = tmp_path / "lab.tif"
+    Image.new("LAB", (4, 4), (128, 128, 128)).save(path)  # L* 50, neutral
+    rgb = load_image(path).rgb[0, 0]
+    assert abs(int(rgb[0]) - 119) <= 2 and rgb[0] == rgb[1] == rgb[2]
+
+
+def test_disk_check_uses_lossy_estimate_for_jpeg(tmp_path, monkeypatch):
+    from pixelift.core import image_processor as ip
+
+    out = tmp_path / "out.jpg"
+    monkeypatch.setattr(ip.iu, "disk_free", lambda _p: 500 * 10**6)
+    monkeypatch.setattr(ip, "available_ram_bytes", lambda: 1 << 40)
+    ip.check_feasible(6000, 4000, ProcessingOptions(output_format="jpeg"), out)
+    with pytest.raises(OutputError):
+        ip.check_feasible(6000, 4000, ProcessingOptions(output_format="png"), out)

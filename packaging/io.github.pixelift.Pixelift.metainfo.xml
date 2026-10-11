@@ -23,6 +23,8 @@
     </ul>
   </description>
   <launchable type="desktop-id">io.github.pixelift.Pixelift.desktop</launchable>
+  <url type="homepage">https://github.com/eman003/pixelift</url>
+  <url type="bugtracker">https://github.com/eman003/pixelift/issues</url>
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>

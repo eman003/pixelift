@@ -16,7 +16,7 @@ from pixelift.core import lighting, presets
 from pixelift.core.image_processor import ProcessingOptions
 from pixelift.core.restoration import settings as rs
 from pixelift.storage import paths
-from pixelift.utils.image_utils import DEFAULT_TEMPLATE, OUTPUT_FORMATS
+from pixelift.utils.image_utils import DEFAULT_TEMPLATE, OUTPUT_FORMATS, check_template
 
 log = logging.getLogger(__name__)
 
@@ -123,6 +123,10 @@ class Settings:
             self.tile_size = 0
         if self.output_format not in OUTPUT_FORMATS:
             self.output_format = default.output_format
+        try:
+            check_template(self.filename_template)
+        except ValueError:
+            self.filename_template = default.filename_template
         self.quality = min(100, max(1, int(self.quality)))
         if self.theme not in THEMES:
             self.theme = default.theme
@@ -265,6 +269,13 @@ class Settings:
         )
 
 
+def _same_type(value: object, default: object) -> bool:
+    """JSON booleans are ints to Python: keep them apart."""
+    if isinstance(default, bool) or isinstance(value, bool):
+        return isinstance(value, bool) and isinstance(default, bool)
+    return isinstance(value, type(default))
+
+
 def settings_path() -> Path:
     return paths.config_dir() / "settings.json"
 
@@ -272,18 +283,21 @@ def settings_path() -> Path:
 def load_settings(path: Path | None = None) -> Settings:
     path = path or settings_path()
     try:
-        raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return Settings()
     except (OSError, ValueError):
         log.warning("Settings file %s is unreadable; using defaults", path, exc_info=True)
+        return Settings()
+    if not isinstance(raw, dict):
+        log.warning("Settings file %s is not a JSON object; using defaults", path)
         return Settings()
     known = {f.name: f for f in dataclasses.fields(Settings)}
     values: dict[str, Any] = {}
     for key, value in raw.items():
         field = known.get(key)
         default = getattr(Settings, key, None) if field else None
-        if field and (default is None or isinstance(value, type(default))):
+        if field and (default is None or _same_type(value, default)):
             values[key] = value
     return Settings(**values).normalise()
 

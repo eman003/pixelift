@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from PIL import Image
 
 from pixelift import cli
@@ -149,3 +150,58 @@ def test_cli_upscales_even_when_the_app_was_left_in_restore_mode(
     with Image.open(tmp_path / "out" / "photo_4x.png") as img:
         assert img.size == (160, 120)
     assert "1 upscaled" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("content", ["[]", "null", "1", '"text"'])
+def test_settings_file_that_is_not_an_object(tmp_path, content):
+    path = tmp_path / "settings.json"
+    path.write_text(content)
+    assert load_settings(path) == Settings()
+
+
+def test_settings_bool_and_int_are_not_mixed_up(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"quality": true, "preserve_metadata": 0}')
+    s = load_settings(path)
+    assert s.quality == Settings().quality
+    assert s.preserve_metadata is Settings().preserve_metadata
+
+
+def test_invalid_filename_template_is_reset(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"filename_template": "{name"}')
+    assert load_settings(path).filename_template == Settings().filename_template
+
+
+def test_cli_rejects_invalid_template(image_factory, tiny_specs, capsys):
+    src = image_factory()
+    assert cli.run_cli([str(src), "-m", "test-x4", "--template", "{name"]) == 2
+    assert "template" in capsys.readouterr().err
+
+
+def test_cli_remove_unknown_model(capsys):
+    assert cli.run_cli(["--remove-model", "no-such-model"]) == 2
+    assert "Unknown model" in capsys.readouterr().err
+
+
+def test_restoration_model_is_not_an_upscaler(tmp_path):
+    from pixelift.core.errors import ModelNotInstalledError
+    from pixelift.core.model_manager import ModelManager
+    from pixelift.models import UPSCALE, all_specs
+
+    other = next(s for s in all_specs() if s.kind != UPSCALE)
+    with pytest.raises(ModelNotInstalledError, match="not a known model"):
+        ModelManager(tmp_path).resolve(other.id, 4)
+
+
+def test_gui_entry_point_opens_files(monkeypatch):
+    import sys
+
+    from pixelift import main
+    from pixelift.ui import application
+
+    opened = []
+    monkeypatch.setattr(application, "run", lambda files: opened.append(files) or 0)
+    monkeypatch.setattr(sys, "argv", ["pixelift-gui", "a.jpg", "--verbose", "b.png"])
+    assert main.gui_main() == 0
+    assert opened == [["a.jpg", "b.png"]]

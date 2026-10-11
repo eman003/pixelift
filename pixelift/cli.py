@@ -394,7 +394,11 @@ def run_cli(argv: list[str]) -> int:
         return 0
     if args.remove_model:
         for model_id in args.remove_model:
-            manager.remove(model_id)
+            try:
+                manager.remove(model_id)
+            except KeyError:
+                print(f"Unknown model: {model_id} (see --list-models)", file=sys.stderr)
+                return 2
             print(f"Removed {model_id}")
         return 0
     if args.download_model:

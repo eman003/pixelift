@@ -30,6 +30,10 @@ dependencies = [
 gui = ["PyGObject>=3.46"]
 dev = ["pytest>=8", "ruff>=0.6"]
 
+[project.urls]
+Homepage = "https://github.com/eman003/pixelift"
+Issues = "https://github.com/eman003/pixelift/issues"
+
 [project.scripts]
 pixelift = "pixelift.main:main"
 image-upscaler = "pixelift.main:main"

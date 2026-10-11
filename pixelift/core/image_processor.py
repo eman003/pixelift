@@ -72,8 +72,10 @@ class ProcessingOptions:
     def validate(self) -> None:
         if self.restoration is not None:
             self.restoration.validate()
-        elif self.scale not in (2, 3, 4):
-            raise ValueError("scale must be 2, 3 or 4")
+        else:
+            if self.scale not in (2, 3, 4):
+                raise ValueError("scale must be 2, 3 or 4")
+            iu.check_template(self.filename_template)
         if self.output_format not in iu.OUTPUT_FORMATS:
             raise ValueError(f"unsupported output format: {self.output_format}")
         if not 1 <= self.quality <= 100:
@@ -242,8 +244,10 @@ def check_feasible(width: int, height: int, options: ProcessingOptions, output: 
             f"but only {iu.human_size(available)} is available.",
             ["Use 2× instead of 4×", "Close other applications", "Split the image into parts"],
         )
-    # Rough PNG size estimate: raw / 2.
-    if iu.disk_free(output.parent) < out_w * out_h * 2:
+    # Rough, generous file size estimates: PNG about raw / 2; JPEG and WebP
+    # are lossy and far smaller.
+    bytes_per_pixel = 2.0 if options.output_format == "png" else 0.5
+    if iu.disk_free(output.parent) < out_w * out_h * bytes_per_pixel:
         raise OutputError(
             f"Not enough free disk space in {output.parent}.",
             ["Free up disk space", "Choose another output folder"],

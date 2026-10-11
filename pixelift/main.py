@@ -16,6 +16,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def gui_main(files: list[str] | None = None) -> int:
+    if files is None:  # the pixelift-gui entry point: open the files it was given
+        files = [a for a in sys.argv[1:] if a != "--gui" and not a.startswith("-")]
     from pixelift.utils.logging import setup_logging
 
     setup_logging()

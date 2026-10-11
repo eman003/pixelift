@@ -26,6 +26,12 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.7.3" date="2026-10-11">
+      <description>
+        <p>Removing a waiting photo from a running batch frees its output name for
+          the other photos.</p>
+      </description>
+    </release>
     <release version="1.7.2" date="2026-10-11">
       <description>
         <p>Photos waiting in a running batch can be removed from the queue again.</p>

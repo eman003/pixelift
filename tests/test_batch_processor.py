@@ -242,3 +242,16 @@ def test_cannot_withdraw_started_item(image_factory):
     assert not proc.withdraw(items[0])
     proc.wait(10)
     assert items[0].status is ItemStatus.DONE
+
+
+def test_withdrawn_item_frees_its_output_name(image_factory):
+    first = QueueItem(image_factory("img0.png"))
+    jpg, png = QueueItem(image_factory("photo.jpg")), QueueItem(image_factory("photo.png"))
+    proc = BatchProcessor(FakeUpscaler(delay=0.05), ProcessingOptions(scale=2), workers=1)
+    proc.start([first, jpg, png])
+    deadline = time.monotonic() + 5
+    while first.status is not ItemStatus.PROCESSING and time.monotonic() < deadline:
+        time.sleep(0.005)  # names are planned before the first job starts
+    assert proc.withdraw(jpg)
+    proc.wait(10)
+    assert png.result.output.name == "photo_2x.png"

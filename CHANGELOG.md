@@ -4,6 +4,14 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.7.3] - 2026-10-11
+
+### Fixed
+
+- Removing a waiting photo from a running batch frees its output name: another
+  photo with the same name in that batch is saved without a " (2)" suffix.
+- A removed photo returns to the queue with no leftover progress or status.
+
 ## [1.7.2] - 2026-10-11
 
 ### Fixed

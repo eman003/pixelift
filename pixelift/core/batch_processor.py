@@ -134,10 +134,12 @@ class BatchProcessor:
         self._threads: list[threading.Thread] = []
         self._lock = threading.Lock()
         self._take_lock = threading.Lock()  # hands items to workers; never held long
+        self._claims_lock = threading.Lock()  # never held long; taken after _take_lock
         self._finished = threading.Event()
         self._started_at = 0.0
         self._remaining = 0
-        self._claims: dict[Path, Path] = {}  # output -> source, guarded by _lock
+        self._claims: dict[Path, Path] = {}  # output -> source, guarded by _claims_lock
+        self._planned_outputs: dict[int, Path] = {}  # item id -> name planned for it
         self._planned = False  # guarded by _lock
         self.summary: BatchSummary | None = None
         # One restoration engine for the whole batch: AI models load once.
@@ -177,9 +179,10 @@ class BatchProcessor:
         with self._take_lock:
             if item.status is not ItemStatus.QUEUED or item not in self._items:
                 return False
-            item.status = ItemStatus.PENDING
+            item.reset()
             # A new list: overall() and _finish() read it without the lock.
             self._items = [i for i in self._items if i is not item]
+            self._release_planned(item)
         self._emit(EventKind.ITEM_FINISHED)  # the totals changed
         return True
 
@@ -202,6 +205,7 @@ class BatchProcessor:
             for i in itertools.chain(items, others)
             if i.status in (ItemStatus.DONE, ItemStatus.SKIPPED) and i.result is not None
         }
+        self._planned_outputs = {}
         self._planned = False
         self._finished.clear()
         self._started_at = time.monotonic()
@@ -251,7 +255,6 @@ class BatchProcessor:
                 self._finish()
 
     def _process(self, item: QueueItem) -> None:
-        item.status = ItemStatus.PROCESSING
         item.stage = "Starting"
         self._emit(EventKind.ITEM_STARTED, item)
         last_emit = 0.0
@@ -311,18 +314,35 @@ class BatchProcessor:
                     output = output_path_for(item.path, info.width, info.height, self.options)
                 except Exception:  # noqa: BLE001 - the job reports it properly
                     continue
-                self._claims.setdefault(_key(output), _key(item.path))
+                output, source = _key(output), _key(item.path)
+                with self._take_lock:
+                    if item.status is not ItemStatus.QUEUED:
+                        continue  # withdrawn while planning
+                    with self._claims_lock:
+                        if self._claims.setdefault(output, source) == source:
+                            self._planned_outputs[item.id] = output
+
+    def _release_planned(self, item: QueueItem) -> None:
+        """Free the name planned for a withdrawn item (caller holds _take_lock)."""
+        output = self._planned_outputs.pop(item.id, None)
+        source = _key(item.path)
+        if output is None or any(_key(i.path) == source for i in self._items):
+            return  # nothing planned, or the same file is still in the batch
+        with self._claims_lock:
+            if self._claims.get(output) == source:
+                del self._claims[output]
 
     def _claim(self, output: Path, source: Path) -> bool:
         output, source = _key(output), _key(source)
-        with self._lock:
+        with self._claims_lock:
             return self._claims.setdefault(output, source) == source
 
     def _finish(self) -> None:
-        items = self._items
-        for item in items:  # never leave items stuck in "Queued"
-            if item.status is ItemStatus.QUEUED:
-                item.status = ItemStatus.CANCELLED
+        with self._take_lock:  # withdraw() may be changing the same items
+            items = self._items
+            for item in items:  # never leave items stuck in "Queued"
+                if item.status is ItemStatus.QUEUED:
+                    item.status = ItemStatus.CANCELLED
         counts = {s: sum(1 for i in items if i.status is s) for s in ItemStatus}
         self.summary = BatchSummary(
             total=len(items),

@@ -58,6 +58,19 @@ def test_queue_row_states(tmp_path):
     assert "50%" in row.status.get_label() and not row.remove_btn.get_sensitive()
 
 
+def _pump_until(condition, timeout=5.0):
+    """Run the GLib main loop until ``condition()`` holds (idle / timeout callbacks)."""
+    import time
+
+    from gi.repository import GLib
+
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out waiting for the main loop"
+        context.iteration(False) or time.sleep(0.01)
+
+
 class _StubApp:
     def __init__(self):
         from pixelift.storage.settings import Settings
@@ -127,6 +140,64 @@ def test_lighting_controls_custom_and_reset():
     assert (app.settings.lighting_profile, app.settings.lighting_intensity) == ("original", 100)
     assert controls.profile_dd.get_selected() == 0
     controls.shutdown()
+
+
+def test_hdr_controls_follow_and_update_settings():
+    from pixelift.core import hdr
+    from pixelift.ui.widgets.hdr import HdrControls
+
+    app = _StubApp()
+    controls = HdrControls(app)
+    ids = [p.id for p in hdr.all_profiles()]
+    # Defaults: off, Natural HDR at its own intensity; the controls wait for the switch.
+    assert not controls.switch.get_active() and not controls.reset_btn.get_visible()
+    assert not controls.profile_dd.get_sensitive() and not controls.intensity_box.get_sensitive()
+    assert controls.intensity.get_value() == hdr.get_profile("natural").default_intensity
+
+    controls.switch.set_active(True)
+    assert app.settings.hdr_enabled and app.settings.hdr().active and app.saves == 1
+    assert controls.profile_dd.get_sensitive() and controls.reset_btn.get_visible()
+    # A new profile starts at its own default intensity.
+    controls.profile_dd.set_selected(ids.index("dramatic"))
+    dramatic = hdr.get_profile("dramatic").default_intensity
+    assert (app.settings.hdr_profile, app.settings.hdr_intensity) == ("dramatic", dramatic)
+    assert controls.intensity.get_value() == dramatic
+    # A drag updates the value at once, but notifies and saves only later.
+    notifies = app.notifies
+    for value in (50, 40, 0):
+        controls.intensity.set_value(value)
+    assert app.settings.hdr_intensity == 0 and not app.settings.hdr().active
+    assert app.notifies == notifies
+    controls.advanced_sliders["shadows"].set_value(30)
+    assert app.settings.hdr_shadows == 30
+    controls.reset_advanced()
+    assert app.settings.hdr_shadows == 0 and controls.advanced_sliders["shadows"].get_value() == 0
+    controls.reset()
+    assert not app.settings.hdr_enabled and not controls.switch.get_active()
+    assert app.settings.hdr() == hdr.HdrSettings()
+    controls.shutdown()
+    assert controls.sync not in app.listeners
+
+
+def test_stage_preview_transform_applies_hdr_to_crops():
+    """The zoomed-in detail of the live preview gets the same HDR as the whole."""
+    import numpy as np
+    from PIL import Image
+
+    from pixelift.core import camera_looks as cl
+    from pixelift.core import hdr
+
+    rgb = np.zeros((90, 120, 3), np.uint8)
+    rgb[:45] = 230
+    rgb[45:] = (30, 25, 20)
+    recipe = hdr.HdrSettings(True, "balanced", 65).recipe()
+    plan = hdr.analyse(rgb)
+    whole = cl.apply_to_pil(
+        Image.fromarray(rgb),
+        cl.LookRecipe(),
+        between=lambda a: hdr.apply_hdr(a, recipe, out=a, plan=plan),
+    )
+    assert np.asarray(whole)[60:, :, :].mean() > rgb[60:].mean() + 3
 
 
 class _RestoreStubApp(_StubApp):
@@ -408,3 +479,201 @@ def test_preset_panel_applies_and_tracks_modified():
     assert set(_render_thumbnails(cl.sample_image(), recipes)) == set(panel.cards)
     panel.shutdown()
     assert panel.sync not in app.listeners
+
+
+def test_preferences_show_and_clear_the_upscale_cache(models_dir):
+    import numpy as np
+
+    from pixelift.core import upscale_cache
+    from pixelift.ui.settings import PreferencesDialog
+
+    app = _RestoreStubApp(models_dir)
+    app.device_report = None
+    app.when_devices_ready = lambda _callback: None
+    assert upscale_cache.store("k", np.zeros((64, 64, 3), np.uint8))
+    dialog = PreferencesDialog(app)
+    assert "KB" in dialog.cache_row.get_subtitle() and dialog.cache_clear.get_sensitive()
+    dialog.cache_clear.emit("clicked")
+    assert upscale_cache.total_bytes() == 0
+    assert dialog.cache_row.get_subtitle().startswith("Empty")
+    assert not dialog.cache_clear.get_sensitive()
+
+
+class _SettingsStubApp(_StubApp):
+    """Adds the settings-changed listeners the Export panel's controls use."""
+
+    def __init__(self):
+        super().__init__()
+        self.settings_listeners = []
+        self.changes = 0
+
+    def on_settings_changed(self, listener):
+        self.settings_listeners.append(listener)
+
+    def off_settings_changed(self, listener):
+        self.settings_listeners.remove(listener)
+
+    def settings_changed(self):
+        self.changes += 1
+        self.settings.normalise()
+        for listener in list(self.settings_listeners):
+            listener()
+
+
+def test_hdr_output_controls_follow_and_update_settings(monkeypatch):
+    from pixelift.core.hdr_output import codecs
+    from pixelift.ui.widgets.hdr_output import FORMAT_IDS, PRIMARY_IDS, HdrOutputControls
+
+    monkeypatch.setattr(codecs, "avif_available", lambda: False)
+    app = _SettingsStubApp()
+    controls = HdrOutputControls(app)
+    _pump_until(lambda: controls._avif is not None)  # probed off the main thread
+    assert controls.format_model.get_string(FORMAT_IDS.index("avif")).endswith("(unavailable)")
+    # SDR by default: the HDR options stay hidden.
+    assert controls.range_buttons["sdr"].get_active() and not controls.hdr_box.get_visible()
+    controls.set_source(False)
+    assert controls.status.get_label() == "SDR source → SDR output"
+
+    controls.range_buttons["hdr"].set_active(True)
+    assert app.settings.output_range == "hdr" and app.settings.hdr_output().enabled
+    assert controls.hdr_box.get_visible()
+    assert "SDR source → HDR conversion" in controls.status.get_label()
+    assert "no lost detail is recovered" in controls.status.get_label()
+    changes = app.changes
+    controls.peak.set_value(4000)
+    assert app.settings.hdr_peak_nits == 4000
+    assert app.changes == changes  # spin steps are debounced: saved once settled
+    _pump_until(lambda: app.changes == changes + 1)
+    controls.primaries_dd.set_selected(PRIMARY_IDS.index("p3"))
+    controls.white.set_value(250)
+    controls.expand.set_active(True)
+    assert app.settings.hdr_output().tag() == "pq4000-p3-w250-x"
+    # A missing encoder is a visible warning, not a silent SDR fallback.
+    controls.format_dd.set_selected(FORMAT_IDS.index("avif"))
+    assert "libaom" in controls.status.get_label()
+    assert controls.status.has_css_class("warning")
+    # An HDR source written as SDR warns that its range is discarded.
+    controls.range_buttons["sdr"].set_active(True)
+    controls.set_source(True)
+    assert "discarded" in controls.status.get_label()
+    app.settings.mode = "restore"
+    app.settings_changed()
+    assert not controls.get_sensitive() and "SDR" in controls.status.get_label()
+
+
+def test_hdr_output_controls_transfer_and_gain_map():
+    from pixelift.ui.widgets.hdr_output import FORMAT_IDS, TRANSFER_IDS, HdrOutputControls
+
+    app = _SettingsStubApp()
+    controls = HdrOutputControls(app)
+    controls.range_buttons["hdr"].set_active(True)
+    assert controls.peak.get_sensitive() and controls.primaries_dd.get_sensitive()
+    controls.transfer_dd.set_selected(TRANSFER_IDS.index("hlg"))
+    assert app.settings.hdr_transfer == "hlg" and app.settings.hdr_output().hlg
+    # HLG fixes the peak (1000 cd/m² reference) and the primaries (Rec. 2020).
+    assert not controls.peak.get_sensitive() and not controls.primaries_dd.get_sensitive()
+    assert "HLG" in controls.status.get_label()
+    controls.format_dd.set_selected(FORMAT_IDS.index("jpeg"))
+    assert app.settings.hdr_output().gain_map
+    assert not controls.transfer_dd.get_visible() and controls.peak.get_sensitive()
+    assert "gain-map JPEG" in controls.status.get_label()
+
+
+def test_hdr_output_controls_shutdown_unsubscribes():
+    from pixelift.ui.widgets.hdr_output import HdrOutputControls
+
+    app = _SettingsStubApp()
+    controls = HdrOutputControls(app)
+    assert controls.sync in app.settings_listeners
+    controls.shutdown()
+    assert controls.sync not in app.settings_listeners
+    controls.set_source(True, gain_map=True)
+    assert "its own SDR picture" in controls.status.get_label()
+    assert "gain map is not used" in controls.status.get_label()
+
+
+def test_hdr_output_controls_avif_probe_off_main_thread(monkeypatch):
+    import threading
+
+    from pixelift.core.hdr_output import codecs
+    from pixelift.ui.widgets.hdr_output import FORMAT_IDS, HdrOutputControls
+
+    release = threading.Event()
+    main = threading.current_thread()
+    threads = []
+
+    def probe():
+        threads.append(threading.current_thread())
+        release.wait(5)
+        return True
+
+    monkeypatch.setattr(codecs, "avif_available", probe)
+    app = _SettingsStubApp()
+    app.settings.output_range, app.settings.hdr_output_format = "hdr", "avif"
+    controls = HdrOutputControls(app)  # returns at once: the probe is still blocked
+    avif = FORMAT_IDS.index("avif")
+    assert "unavailable" not in controls.format_model.get_string(avif)  # neutral until known
+    assert "libaom" not in controls.status.get_label()  # unknown yet: no warning
+    release.set()
+    _pump_until(lambda: controls._avif is True)
+    assert threads and threads[0] is not main
+    assert "unavailable" not in controls.format_model.get_string(avif)
+    assert controls.format_dd.get_selected() == avif
+    controls.shutdown()
+
+
+def test_hdr_output_controls_flush_debounced_save_on_shutdown():
+    from pixelift.ui.widgets.hdr_output import HdrOutputControls
+
+    app = _SettingsStubApp()
+    app.settings.output_range = "hdr"
+    controls = HdrOutputControls(app)
+    changes = app.changes
+    controls.white.set_value(250)
+    controls.white.set_value(260)
+    assert app.settings.hdr_sdr_white == 260 and app.changes == changes
+    controls.shutdown()  # a pending save is not lost
+    assert app.changes == changes + 1
+
+
+def test_add_paths_collects_off_main_thread_and_dedups(tmp_path):
+    import time
+
+    from conftest import make_image
+    from gi.repository import GLib
+
+    from pixelift.ui import main_window as mw
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    first, second = make_image(folder / "a.png"), make_image(folder / "b.png")
+    added, toasts = [], []
+
+    class Fake:
+        ready, _closed = True, False
+        add_paths = mw.MainWindow.add_paths
+        _add_collected = mw.MainWindow._add_collected
+
+        def __init__(self):
+            self.rows = [type("R", (), {"item": mw.QueueItem(first)})()]
+            self.toasts = type("T", (), {"add_toast": lambda _s, t: toasts.append(t)})()
+
+        def _add_row(self, item):
+            added.append(item.path)
+
+        def _update_state(self):
+            pass
+
+    window = Fake()
+    window.add_paths([folder])
+    assert not added  # collected in the background
+    _pump_until(lambda: bool(toasts))
+    assert added == [second]  # a.png is already queued
+    # A window closed meanwhile ignores the late result.
+    window.rows, window._closed = [], True
+    toasts.clear()
+    window.add_paths([folder])
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        GLib.MainContext.default().iteration(False)
+    assert added == [second] and not toasts

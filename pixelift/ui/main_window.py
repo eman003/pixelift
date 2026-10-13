@@ -15,19 +15,21 @@ Both modes share the queue, the worker and the output options.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import traceback
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 from PIL import Image
 
 from pixelift import APP_ID, APP_NAME
 from pixelift.core import camera_looks as cl
 from pixelift.core import device_manager as dm
-from pixelift.core import lighting, presets
+from pixelift.core import hdr, lighting, presets, upscale_cache
 from pixelift.core.batch_processor import (
     BatchEvent,
     BatchProcessor,
@@ -42,7 +44,9 @@ from pixelift.core.errors import (
     UpscalerError,
     friendly_error,
 )
-from pixelift.core.image_processor import output_tag, restoration_tag
+from pixelift.core.hdr_output.codecs import HdrCodecError
+from pixelift.core.hdr_output.pipeline import FORMATS as HDR_FORMATS
+from pixelift.core.image_processor import output_tag, restoration_tag, result_tags
 from pixelift.core.restoration import settings as rs
 from pixelift.core.upscaler import TorchUpscaler
 from pixelift.models import all_families
@@ -52,6 +56,8 @@ from pixelift.ui.preview import CompareView
 from pixelift.ui.startup import STATUS_DEVICE, STATUS_READY, StartupScreen
 from pixelift.ui.widgets.camera_looks import GRAIN_LABELS, CameraLookControls
 from pixelift.ui.widgets.dialogs import show_error
+from pixelift.ui.widgets.hdr import HdrControls
+from pixelift.ui.widgets.hdr_output import HdrOutputControls
 from pixelift.ui.widgets.lighting import LightingControls
 from pixelift.ui.widgets.presets import PresetPanel
 from pixelift.ui.widgets.restoration import (
@@ -61,7 +67,14 @@ from pixelift.ui.widgets.restoration import (
     RestorationPanel,
 )
 from pixelift.ui.widgets.textures import texture_from_pil
-from pixelift.utils.image_utils import SUPPORTED_EXTENSIONS, collect_images, load_preview
+from pixelift.utils.image_utils import (
+    GAIN_MAP_FORMAT,
+    SUPPORTED_EXTENSIONS,
+    ImageInfo,
+    collect_images,
+    hdr_source,
+    load_preview,
+)
 
 if TYPE_CHECKING:
     from pixelift.ui.application import UpscalerApplication
@@ -79,8 +92,32 @@ TABS = (
     ("enhance", "Enhance", "Scale, AI model and restoration"),
     ("light", "Light", "Lighting profile and intensity"),
     ("look", "Look", "Camera look, intensity and grain"),
-    ("export", "Export", "File format and output folder"),
+    ("hdr", "HDR", "HDR-like enhancement of the upscaled image"),
+    ("export", "Export", "File format, dynamic range (SDR or HDR) and output folder"),
 )
+
+
+def _is_hdr_info(info: ImageInfo | None) -> bool:
+    """Whether a probed photo is an HDR source (``probe_image`` labels them "HDR …")."""
+    return info is not None and info.format.startswith("HDR ")
+
+
+def _is_hdr_file(path: Path) -> bool:
+    """Whether an output is an HDR file (gain-map JPEGs included). Runs on
+    every batch event, so the header is only parsed again when the file changes."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    return _is_hdr_file_cached(path, stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=64)
+def _is_hdr_file_cached(path: Path, _mtime_ns: int, _size: int) -> bool:
+    try:
+        return hdr_source(path, gain_maps=True) is not None
+    except (OSError, ValueError, HdrCodecError):
+        return False
 
 
 class MainWindow(Adw.ApplicationWindow):
@@ -91,6 +128,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_size_request(380, 520)
         self.rows: list[QueueRow] = []
         self.thumbnails = ThumbnailLoader()
+        self._closed = False  # set on close: late background results are dropped
         self.processor: BatchProcessor | None = None
         self._upscaler: TorchUpscaler | None = None
         self._upscaler_key: tuple[object, ...] | None = None
@@ -259,6 +297,8 @@ class MainWindow(Adw.ApplicationWindow):
         self.camera_look = CameraLookControls(app)
         self._attempt_undo.append(self.camera_look.shutdown)
         yield
+        self.hdr_controls = HdrControls(app)
+        self._attempt_undo.append(self.hdr_controls.shutdown)
         self.preset_panel = PresetPanel(app)
         self._attempt_undo.append(self.preset_panel.shutdown)
         yield
@@ -290,6 +330,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.restore_panel,
             self.lighting,
             self.camera_look,
+            self.hdr_controls,
             self.dock_bar,
         ):
             narrow.add_setter(box, "orientation", Gtk.Orientation.VERTICAL)
@@ -639,6 +680,11 @@ class MainWindow(Adw.ApplicationWindow):
             self._labeled("Format", self._segment_box(self.format_buttons), False)
         )
         self.export_box.append(self._labeled("Output", output_row))
+        self.hdr_output_controls = HdrOutputControls(self.app)
+        self._attempt_undo.append(self.hdr_output_controls.shutdown)
+        export = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        export.append(self.export_box)
+        export.append(self.hdr_output_controls)
 
         self.panel_stack = Gtk.Stack(
             transition_type=Gtk.StackTransitionType.CROSSFADE,
@@ -650,7 +696,8 @@ class MainWindow(Adw.ApplicationWindow):
             ("enhance", enhance),
             ("light", self.lighting),
             ("look", self.camera_look),
-            ("export", self.export_box),
+            ("hdr", self.hdr_controls),
+            ("export", export),
         ):
             self.panel_stack.add_named(Adw.Clamp(maximum_size=1000, child=widget), key)
         self.panel_stack.add_css_class("dock-panel")
@@ -784,14 +831,22 @@ class MainWindow(Adw.ApplicationWindow):
             look_text += f" · {settings.camera_look_intensity}%"
         if look.look != cl.ORIGINAL and settings.camera_look_grain != cl.GRAIN_AUTO:
             look_text += " · " + GRAIN_LABELS[settings.camera_look_grain]
+        hdr_settings = settings.hdr()
+        hdr_text = "Off"
+        if hdr_settings.enabled:
+            hdr_text = f"{hdr.get_profile(hdr_settings.profile).name} · {hdr_settings.intensity}%"
         fmt = dict(FORMATS)[settings.output_format]
+        hdr_output = settings.processing_options().effective_hdr_output()
+        if hdr_output.enabled:
+            fmt = f"HDR {HDR_FORMATS[hdr_output.format][0]}"
         preset_name, _modified = presets.status(settings)
         values = {
             "preset": (presets.label(settings), preset_name not in ("Original", "Custom")),
             "enhance": (enhance, False),
             "light": (light_text, light.active),
             "look": (look_text, look.active),
-            "export": (f"{fmt} · {self.output_label.get_label()}", False),
+            "hdr": (hdr_text, hdr_settings.active),
+            "export": (f"{fmt} · {self.output_label.get_label()}", hdr_output.enabled),
         }
         for key, (text, modified) in values.items():
             self.tab_values[key].set_label(text)
@@ -836,6 +891,12 @@ class MainWindow(Adw.ApplicationWindow):
             self.scale_buttons[SCALES.index(scale) if scale in SCALES else 1].set_active(True)
             fmt_ids = [f for f, _ in FORMATS]
             self.format_buttons[fmt_ids.index(settings.output_format)].set_active(True)
+            hdr_files = settings.output_range == "hdr" and not restoring
+            for button in self.format_buttons:
+                button.set_sensitive(not hdr_files)
+                button.set_tooltip_text(
+                    "HDR output uses its own format (see Range)" if hdr_files else None
+                )
             if settings.output_dir:
                 self.output_label.set_label(Path(settings.output_dir).name or settings.output_dir)
                 self.output_btn.set_tooltip_text(settings.output_dir)
@@ -862,6 +923,10 @@ class MainWindow(Adw.ApplicationWindow):
         settings = self.app.settings
         _colorize, upscale = rs.preset_flags(settings.restore_preset)
         self.restore_panel.set_visible(restoring)
+        # HDR enhances the upscaled image; restoration does without it.
+        self.tab_buttons["hdr"].set_visible(not restoring)
+        if restoring and self.panel_stack.get_visible_child_name() == "hdr":
+            self.show_panel(None)
         self.scale_box.set_visible(not restoring or upscale)
         if restoring:
             self.empty_title.set_label("Bring old photographs back")
@@ -873,7 +938,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.empty_title.set_label("Drop photos to begin")
             self.empty_description.set_label(
                 "Upscale with AI, then give them light and a camera look. "
-                "PNG, JPEG, WebP, TIFF or BMP — single images or whole folders."
+                "PNG, JPEG, WebP, AVIF, TIFF, BMP or HDR (EXR, .hdr, PQ) — "
+                "single images or whole folders."
             )
             self.privacy_label.set_label("🔒 Your images stay on your computer.")
         self._update_bw_banner()
@@ -905,17 +971,23 @@ class MainWindow(Adw.ApplicationWindow):
         """
         if self.running:
             return
-        tag = self.app.settings.lighting().tag()
-        look = self.app.settings.camera_look_settings().tag()
-        output = output_tag(self.app.settings.processing_options())
+        options = self.app.settings.processing_options()
+        output = output_tag(options)
+        hdr_files = options.effective_hdr_output().enabled
+        # HDR sources written as HDR skip lighting, looks and HDR Enhancement,
+        # so those settings do not make their results stale.
+        tags = {kept: result_tags(options, kept) for kept in (False, True)}
+
+        def current(row: QueueRow) -> tuple[str, str, str]:
+            return tags[hdr_files and _is_hdr_info(row.info)]
+
         stale = [
             r
             for r in self.rows
             if r.item.status in (ItemStatus.DONE, ItemStatus.SKIPPED)
             and r.item.result is not None
             and (
-                r.item.result.lighting != tag
-                or r.item.result.look != look
+                (r.item.result.lighting, r.item.result.look, r.item.result.hdr) != current(r)
                 or r.item.result.restoration != self._expected_restoration(r)
                 or r.item.result.output_settings != output
             )
@@ -1027,6 +1099,7 @@ class MainWindow(Adw.ApplicationWindow):
             self._drop_restore_preview()
             view.clear()
             self.stage_spinner.set_spinning(row is not None and row.load_error is None)
+            self.hdr_output_controls.set_source(None)  # no stale "HDR discarded" warning
             for widget in (self.stage_badge, self.stage_info, self.stage_tools):
                 widget.set_visible(False)
             return
@@ -1092,17 +1165,21 @@ class MainWindow(Adw.ApplicationWindow):
         self._update_stage_overlays()
 
     def _wanted_stage_look(self) -> tuple | None:
-        """(lighting, look, output size) to preview on the stage; None: nothing."""
+        """(lighting, look, HDR, output size) to preview on the stage; None: nothing."""
         row = self._stage_row
         if self._stage_is_output or row is None or row.info is None:
             return None
         settings = self.app.settings
-        adjustments = settings.lighting().adjustments()
-        recipe = settings.camera_look_settings().recipe()
-        if adjustments.is_neutral and recipe.is_neutral:
+        options = settings.processing_options()
+        adjustments = options.lighting.adjustments()
+        recipe = options.camera_look.recipe()
+        hdr_recipe = options.effective_hdr().recipe()
+        if adjustments.is_neutral and recipe.is_neutral and hdr_recipe.is_neutral:
             return None
-        scale = settings.processing_options().output_scale
-        return adjustments, recipe, (row.info.width * scale, row.info.height * scale)
+        if options.effective_hdr_output().enabled and _is_hdr_info(row.info):
+            return None  # SDR-only tools are not applied to HDR sources written as HDR
+        scale = options.output_scale
+        return adjustments, recipe, hdr_recipe, (row.info.width * scale, row.info.height * scale)
 
     def _render_stage_look(self) -> None:
         """Bring the "after" side up to date with the lighting and camera look."""
@@ -1122,13 +1199,43 @@ class MainWindow(Adw.ApplicationWindow):
         if self._stage_busy:
             return  # picked up when the running render finishes
         self._stage_busy = True
-        adjustments, recipe, output = wanted
+        adjustments, recipe, hdr_recipe, output = wanted
         sw, sh = view.before.source_size
+        # HDR's base layer comes from the whole photo, so zoomed-in crops
+        # match it (set by the full render, which runs first).
+        plans: list[hdr.HdrPlan] = []
 
-        def transform(region: Image.Image, crop_scale: float) -> Image.Image:
+        def enhance(rgb: np.ndarray) -> None:
+            plans.append(hdr.analyse(rgb))
+            hdr.apply_hdr(rgb, hdr_recipe, out=rgb, plan=plans[0])
+
+        def transform(
+            region: Image.Image, crop_scale: float, where: tuple[float, float, float, float]
+        ) -> Image.Image:
             """The look on a full-detail crop (zoomed in), framed as the whole photo."""
             frame = (round(sw * crop_scale), round(sh * crop_scale))
-            return cl.apply_to_pil(region, recipe, adjustments, frame=frame, output=output)
+
+            def enhance_crop(rgb: np.ndarray) -> None:
+                hdr.apply_hdr(rgb, hdr_recipe, out=rgb, plan=plans[0], frame=frame, region=where)
+
+            return cl.apply_to_pil(
+                region,
+                recipe,
+                adjustments,
+                frame=frame,
+                output=output,
+                between=enhance_crop if plans else None,
+            )
+
+        def render() -> Image.Image:
+            return cl.apply_to_pil(
+                base,
+                recipe,
+                adjustments,
+                quick=True,
+                output=output,
+                between=None if hdr_recipe.is_neutral else enhance,
+            )
 
         def current() -> bool:
             return base is self._stage_base and not self._restore_active
@@ -1159,7 +1266,7 @@ class MainWindow(Adw.ApplicationWindow):
                 self._render_stage_look()  # moved on meanwhile: render that
 
         run_in_thread(
-            lambda: cl.apply_to_pil(base, recipe, adjustments, quick=True, output=output),
+            render,
             on_done=done,
             on_error=failed,
             name="stage-look",
@@ -1212,7 +1319,6 @@ class MainWindow(Adw.ApplicationWindow):
         except Exception as exc:  # noqa: BLE001 - torch or the GPU driver failed to start
             self._engine_failed(exc)
             return
-        import numpy as np
 
         rgb = np.array(base.convert("RGB"))
         quick = dataclasses.replace(settings, scale=1)  # preview without upscaling
@@ -1301,14 +1407,29 @@ class MainWindow(Adw.ApplicationWindow):
         _target, is_output = self._stage_target(row)
         result = row.item.result if is_output else None
         has_after = view.after.texture is not None
+        source_hdr = _is_hdr_info(row.info)
+        hdr_files = self.app.settings.processing_options().effective_hdr_output().enabled
+        self.hdr_output_controls.set_source(
+            source_hdr if row.info is not None else None,
+            gain_map=row.info is not None and row.info.format == GAIN_MAP_FORMAT,
+        )
         if result is not None:
             after_label = "Restored" if result.restored else "Upscaled"
+            if result.output.suffix.lower() in (".png", ".avif", ".jpg") and _is_hdr_file(
+                result.output
+            ):
+                # The stage cannot present HDR: say it is an SDR rendition.
+                after_label += " · HDR file, SDR preview"
+            elif result.hdr:
+                after_label += " · HDR Enhanced"
         elif self._restore_shown:
             after_label = "Restored · Preview"
         else:
-            after_label = "Live Preview"
+            after_label = "Live Preview · SDR" if hdr_files else "Live Preview"
         restored = self._restore_shown or bool(result and result.restored)
         view.before_label = "Original Scan" if restored else "Original"
+        if source_hdr:
+            view.before_label = "Original · HDR, SDR preview"
         view.after_label = after_label
         view.queue_draw()
         if self._stage_failed:
@@ -1403,8 +1524,28 @@ class MainWindow(Adw.ApplicationWindow):
         if not self.ready:
             self._pending_paths.extend(paths)  # opened with files: added once shown
             return
+        # Expanding folders walks the disk (recursive glob, resolve): off the
+        # main thread, so a big folder does not freeze the window.
+        run_in_thread(
+            lambda: [(p, p.resolve()) for p in collect_images(paths)],
+            on_done=lambda found: self._add_collected(paths, found),
+            on_error=lambda exc: self._add_collected(paths, [], exc),
+            name="collect",
+        )
+
+    def _add_collected(
+        self,
+        paths: list[Path],
+        found: list[tuple[Path, Path]],
+        error: BaseException | None = None,
+    ) -> None:
+        """Add the images ``add_paths`` found (main thread): (path, resolved) pairs."""
+        if self._closed:
+            return
+        if error is not None:
+            log.warning("Could not read the dropped files: %s", error)
         existing = {row.item.path.resolve() for row in self.rows}
-        images = [p for p in collect_images(paths) if p.resolve() not in existing]
+        images = [p for p, key in found if key not in existing]
         for path in images:
             self._add_row(QueueItem(path))
         if images:
@@ -1630,6 +1771,19 @@ class MainWindow(Adw.ApplicationWindow):
                 )
             )
             return
+
+        # Cache upscales for later HDR changes only when the batch fits the
+        # cache: larger ones would evict their own entries before any reuse.
+        scale = options.scale
+        hdr_files = options.effective_hdr_output().enabled
+
+        def cached_bytes(info: ImageInfo) -> int:
+            # HDR sources written as HDR are cached as a 16-bit proxy.
+            per_pixel = 6 if hdr_files and _is_hdr_info(info) else 3
+            return info.width * info.height * scale * scale * per_pixel
+
+        upscaled = sum(cached_bytes(r.info) for r in todo if r.info is not None)
+        options.cache_upscale = upscaled <= upscale_cache.MAX_BYTES
 
         try:
             upscaler = self._get_upscaler()
@@ -1887,6 +2041,7 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_close_request(self, _window: Gtk.Window) -> bool:
         if not self.running:
+            self._closed = True
             self.thumbnails.shutdown()
             return False
         dialog = Adw.AlertDialog(
@@ -1902,6 +2057,7 @@ class MainWindow(Adw.ApplicationWindow):
             if response == "quit" and self.processor:
                 self.processor.cancel()
                 self.processor.wait(5)
+                self._closed = True
                 self.thumbnails.shutdown()
                 self.destroy()
 

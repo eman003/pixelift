@@ -8,6 +8,6 @@ Icon=io.github.pixelift.Pixelift
 Terminal=false
 Categories=Graphics;RasterGraphics;GTK;
 Keywords=upscale;upscaler;super-resolution;enlarge;resize;ai;esrgan;photo;
-MimeType=image/png;image/jpeg;image/webp;image/tiff;image/bmp;
+MimeType=image/png;image/jpeg;image/webp;image/tiff;image/bmp;image/avif;image/x-exr;image/vnd.radiance;image/x-hdr;
 StartupNotify=true
 StartupWMClass=io.github.pixelift.Pixelift

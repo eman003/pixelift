@@ -53,6 +53,14 @@ DEFAULT_OVERLAP = 32
 # process-wide, so it must be undone explicitly when the limit is removed.
 _limited_cuda_devices: set[str] = set()
 
+_TILES_USED_MAX = 256  # input shapes whose tile size is remembered
+
+
+def _half_for(device: dm.DeviceInfo, wide: bool) -> bool:
+    """Whether inference runs in float16: never for 16-bit (HDR proxy) input,
+    whose precision float16's 11 bits could not hold."""
+    return _uses_half(device) and not wide
+
 
 def _uses_half(device: dm.DeviceInfo) -> bool:
     return device.kind in ("cuda", "xpu")
@@ -63,7 +71,14 @@ class _DeviceChangedError(Exception):
 
 
 class Upscaler(ABC):
-    """Upscale an RGB ``uint8`` array of shape (H, W, 3)."""
+    """Upscale an RGB array of shape (H, W, 3).
+
+    ``uint8`` is the usual input; ``uint16`` (used for the HDR proxy, see
+    ``core/hdr_output``) is accepted by upscalers whose ``supports_uint16`` is
+    True. The result has the input's dtype.
+    """
+
+    supports_uint16 = False
 
     @abstractmethod
     def upscale(
@@ -86,8 +101,25 @@ class Upscaler(ABC):
     def device_label(self) -> str:
         return "CPU"
 
+    def cache_identity(
+        self,
+        model: str,
+        scale: int,
+        size: tuple[int, int] | None = None,
+        wide: bool = False,
+    ) -> tuple[object, ...] | None:
+        """Everything besides the input that ``upscale(…, scale, model)``'s
+        pixels depend on, for caching its result; None: never cache them.
+
+        ``size`` is the input's (height, width) and ``wide`` whether it is
+        ``uint16``: both can change how the work is done (tiling, precision).
+        """
+        return None
+
 
 class TorchUpscaler(Upscaler):
+    supports_uint16 = True  # the network works in float either way
+
     def __init__(
         self,
         model_manager: ModelManager,
@@ -108,9 +140,62 @@ class TorchUpscaler(Upscaler):
         self.on_device_change = on_device_change
         self._nets: dict[str, nn.Module] = {}
         self._lock = threading.RLock()
+        # (spec id, input size, device id, wide, configured tile) -> the tile
+        # size an upscale actually used there, after any out-of-memory retries.
+        # Per instance (not per thread): every GUI batch runs new worker threads.
+        self._tiles_used: dict[tuple[object, ...], int] = {}
         if cpu_threads > 0:
             torch.set_num_threads(cpu_threads)
         self._apply_memory_limit()
+
+    def cache_identity(
+        self,
+        model: str,
+        scale: int,
+        size: tuple[int, int] | None = None,
+        wide: bool = False,
+    ) -> tuple[object, ...] | None:
+        """The weights (by checksum), tile size, device and precision.
+
+        The tile size is the one the last upscale of this input shape on
+        this device actually used (after any out-of-memory retries), or else
+        the size an upscale would choose now: with automatic tiling that
+        depends on the free memory. Without ``size`` only a fixed tile size
+        can be assumed; with automatic tiling it cannot be known: None.
+        """
+        try:
+            spec = self.models.resolve(model, scale)
+        except UpscalerError:
+            return None
+        if not spec.sha256:
+            return None  # weights that cannot be identified
+        with self._lock:
+            device = self.device
+            used = (
+                None
+                if size is None
+                else self._tiles_used.get(self._tile_key(spec, size, device, wide))
+            )
+        tile = self.tile_size
+        if used is not None:
+            tile = used
+        elif tile <= 0:
+            if size is None:
+                return None
+            tile = self.choose_tile_size(spec, size[0], size[1], device, wide)
+        return (
+            type(self).__name__,
+            spec.id,
+            spec.sha256,
+            tile,
+            device.id,
+            _half_for(device, wide),
+        )
+
+    def _tile_key(
+        self, spec: ModelSpec, size: tuple[int, int], device: dm.DeviceInfo, wide: bool
+    ) -> tuple[object, ...]:
+        return (spec.id, tuple(size), device.id, wide, self.tile_size)
 
     # --- properties --------------------------------------------------------
     @property
@@ -139,16 +224,21 @@ class TorchUpscaler(Upscaler):
         log.info("Limiting %s to %.0f%% of its memory", device_id, fraction * 100)
 
     # --- model loading -----------------------------------------------------
-    def load(self, spec: ModelSpec) -> nn.Module:
+    def load(self, spec: ModelSpec, full_precision: bool = False) -> nn.Module:
         """Load ``spec`` onto the device once; later calls reuse it.
+
+        ``full_precision`` keeps a float32 copy on devices that otherwise run
+        in float16 (for 16-bit input).
 
         Cached networks always live on ``self.device``: ``_switch_to_cpu``
         clears the cache under the same lock when it changes the device.
         """
         import torch
 
+        half = self.half and not full_precision
+        key = spec.id if half or not self.half else f"{spec.id}#float32"
         with self._lock:
-            net = self._nets.get(spec.id)
+            net = self._nets.get(key)
             if net is not None:
                 return net
             path = self.models.ensure_verified(spec)
@@ -172,9 +262,9 @@ class TorchUpscaler(Upscaler):
             del checkpoint
             net.eval().requires_grad_(False)
             net = net.to(dm.to_torch(self.device))
-            if self.half:
+            if half:
                 net = net.half()
-            self._nets[spec.id] = net
+            self._nets[key] = net
             return net
 
     def release(self) -> None:
@@ -268,11 +358,16 @@ class TorchUpscaler(Upscaler):
         return free
 
     def choose_tile_size(
-        self, spec: ModelSpec, height: int, width: int, device: dm.DeviceInfo
+        self,
+        spec: ModelSpec,
+        height: int,
+        width: int,
+        device: dm.DeviceInfo,
+        wide: bool = False,
     ) -> int:
         if self.tile_size > 0:
             return self.tile_size
-        bytes_per_px = spec.memory_per_pixel * (0.5 if _uses_half(device) else 1.0)
+        bytes_per_px = spec.memory_per_pixel * (0.5 if _half_for(device, wide) else 1.0)
         if device.is_gpu:
             budget = int(self._gpu_free_memory(device) * 0.6)
             cap = 1024
@@ -290,14 +385,15 @@ class TorchUpscaler(Upscaler):
         progress: TileProgress | None = None,
         control: JobControl | None = None,
     ) -> np.ndarray:
-        if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-            raise ValueError("expected an RGB uint8 array of shape (H, W, 3)")
+        if image.ndim != 3 or image.shape[2] != 3 or image.dtype not in (np.uint8, np.uint16):
+            raise ValueError("expected an RGB uint8 or uint16 array of shape (H, W, 3)")
         if scale < 1:
             raise ValueError("scale must be >= 1")
         spec = self.models.resolve(model, scale)
         height, width = image.shape[:2]
+        wide = image.dtype == np.uint16
         try:
-            out = np.empty((height * scale, width * scale, 3), dtype=np.uint8)
+            out = np.empty((height * scale, width * scale, 3), dtype=image.dtype)
         except (MemoryError, ValueError) as exc:
             raise ImageTooLargeError(
                 "There is not enough memory to hold the upscaled image.",
@@ -313,10 +409,16 @@ class TorchUpscaler(Upscaler):
             with self._lock:
                 device = self.device
             if device != tile_device:
-                tile = self.choose_tile_size(spec, height, width, device)
+                tile = self.choose_tile_size(spec, height, width, device, wide)
                 tile_device = device
             try:
                 self._run_tiled(spec, device, image, out, scale, tile, progress, control)
+                with self._lock:
+                    key = self._tile_key(spec, (height, width), device, wide)
+                    self._tiles_used.pop(key, None)  # most recent last
+                    self._tiles_used[key] = tile
+                    while len(self._tiles_used) > _TILES_USED_MAX:
+                        del self._tiles_used[next(iter(self._tiles_used))]
                 return out
             except _DeviceChangedError:
                 continue
@@ -369,7 +471,8 @@ class TorchUpscaler(Upscaler):
             if self.device != device:
                 # Switched to the CPU since this attempt began: let upscale() retry.
                 raise _DeviceChangedError
-            net = self.load(spec)
+            wide = image.dtype == np.uint16
+            net = self.load(spec, full_precision=True) if wide else self.load(spec)
         height, width = image.shape[:2]
         overlap = 0 if tile >= max(height, width) else min(DEFAULT_OVERLAP, tile // 4)
         tiles = plan_tiles(height, width, tile, overlap)
@@ -400,10 +503,13 @@ class TorchUpscaler(Upscaler):
 
         th, tw = patch.shape[:2]
         native = spec.native_scale
-        dtype = torch.float16 if _uses_half(device) else torch.float32
+        wide = patch.dtype == np.uint16
+        dtype = torch.float16 if _half_for(device, wide) else torch.float32
+        top = 65535.0 if wide else 255.0
         with torch.inference_mode():
-            x = torch.from_numpy(np.ascontiguousarray(patch)).to(dm.to_torch(device))
-            x = x.permute(2, 0, 1).unsqueeze(0).to(dtype).div_(255.0)
+            data = patch.astype(np.int32) if wide else patch  # torch has no uint16 maths
+            x = torch.from_numpy(np.ascontiguousarray(data)).to(dm.to_torch(device))
+            x = x.permute(2, 0, 1).unsqueeze(0).to(dtype).div_(top)
             pad_h = -th % spec.size_multiple
             pad_w = -tw % spec.size_multiple
             if pad_h or pad_w:
@@ -414,7 +520,11 @@ class TorchUpscaler(Upscaler):
                 y = F.interpolate(
                     y.float(), size=(th * scale, tw * scale), mode="bicubic", antialias=True
                 )
-            y = y.clamp_(0.0, 1.0).mul_(255.0).round_().to(torch.uint8)
-            result = y[0].permute(1, 2, 0).contiguous().cpu().numpy()
+            if wide:
+                y = y.float().clamp_(0.0, 1.0).mul_(top).round_().to(torch.int32)
+                result = y[0].permute(1, 2, 0).contiguous().cpu().numpy().astype(np.uint16)
+            else:
+                y = y.clamp_(0.0, 1.0).mul_(top).round_().to(torch.uint8)
+                result = y[0].permute(1, 2, 0).contiguous().cpu().numpy()
             del y
         return result

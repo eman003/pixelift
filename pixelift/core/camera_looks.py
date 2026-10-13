@@ -1014,15 +1014,18 @@ def apply_to_pil(
     quick: bool = False,
     output: tuple[int, int] | None = None,
     lut_size: int | None = None,
+    between: Callable[[np.ndarray], None] | None = None,
 ) -> Image.Image:
     """Lighting, grade and finish on a Pillow image, keeping alpha (the preview).
 
     Matches the export, which applies the finish after upscaling (pass the
     export's size as ``output``; see :func:`finish_look`). ``quick`` uses the
     smaller lookup table (for live slider updates); ``lut_size`` sets it.
+    ``between`` edits the RGB array in place where the export upscales (after
+    the grade, before the finish): the HDR preview.
     """
     lighting = lighting or Adjustments()
-    if recipe.is_neutral and lighting.is_neutral:
+    if recipe.is_neutral and lighting.is_neutral and between is None:
         return img
     if img.mode in ("P", "PA") or (img.mode != "RGBA" and "transparency" in img.info):
         img = img.convert("RGBA")  # palette or colour-key transparency
@@ -1031,6 +1034,8 @@ def apply_to_pil(
     apply_lighting(rgb, lighting, out=rgb)
     size = lut_size or (PREVIEW_LUT_SIZE if quick else None)
     apply_look(rgb, recipe, out=rgb, frame=frame, lut_size=size)
+    if between is not None:
+        between(rgb)
     finish_look(rgb, recipe, out=rgb, frame=frame, output=output)
     result = Image.fromarray(rgb, "RGB")
     if alpha is not None:

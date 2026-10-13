@@ -76,11 +76,11 @@ def paste_tile(out: np.ndarray, tile: np.ndarray, oy: int, ox: int, ov_y: int, o
     if ov_y:
         mask = (wy[:ov_y, None] * wx[None, :])[..., None]
         top = region[:ov_y]
-        top[...] = (top * (1.0 - mask) + tile[:ov_y] * mask + 0.5).astype(np.uint8)
+        top[...] = (top * (1.0 - mask) + tile[:ov_y] * mask + 0.5).astype(out.dtype)
     if ov_x:
         mask = wx[None, :ov_x, None]
         left = region[ov_y:, :ov_x]
-        left[...] = (left * (1.0 - mask) + tile[ov_y:, :ov_x] * mask + 0.5).astype(np.uint8)
+        left[...] = (left * (1.0 - mask) + tile[ov_y:, :ov_x] * mask + 0.5).astype(out.dtype)
 
 
 def auto_tile_size(

@@ -12,7 +12,7 @@ Memory: both images are loaded as previews no larger than the stage's preview
 size. When the user zooms in beyond the preview's resolution, only the visible
 region is decoded at full resolution (in a background thread) and drawn on top
 — the full-resolution image is never kept in memory by the UI. A side's
-``transform`` (the look) is applied to that region too.
+``transform`` (the look and HDR) is applied to that region too.
 """
 
 from __future__ import annotations
@@ -57,8 +57,11 @@ class _Side:
         self.detail: tuple[Gdk.Texture, tuple[float, float, float, float]] | None = None
         self.generation = 0
         # Applied (off the main thread) to detail crops decoded from ``path``;
-        # gets the crop and its scale relative to the full-resolution file.
-        self.transform: Callable[[Image.Image, float], Image.Image] | None = None
+        # gets the crop, its scale relative to the full-resolution file and
+        # where it is in the picture (normalised x0, y0, x1, y1).
+        self.transform: (
+            Callable[[Image.Image, float, tuple[float, float, float, float]], Image.Image] | None
+        ) = None
 
     def clear(self) -> None:
         self.path = None
@@ -299,9 +302,11 @@ class CompareView(Gtk.Widget):
         path = side.path
         transform = side.transform
 
+        where = (box[0] / sw, box[1] / sh, box[2] / sw, box[3] / sh)
+
         def load() -> Image.Image:
             region = load_region(path, box, (out_w, out_h))
-            return transform(region, out_w / (box[2] - box[0])) if transform else region
+            return transform(region, out_w / (box[2] - box[0]), where) if transform else region
 
         def done(img: Image.Image) -> None:
             if generation == side.generation:

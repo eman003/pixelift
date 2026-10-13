@@ -57,6 +57,7 @@ DETECT_MIN_SCORE = 0.9
 SURE_SCORE = 0.97  # facexlib's threshold; below it the blend is reduced
 MIN_EYE_DISTANCE = 5.0  # px in the source photo; smaller "faces" are skipped
 BORDER_RGB = (132.0, 133.0, 135.0)  # facexlib's grey crop border (RGB order)
+PASTE_BAND_PIXELS = 1 << 20  # paste-back works in row bands of about this many pixels
 
 
 @dataclass(frozen=True)
@@ -190,16 +191,16 @@ def _sample(src: torch.Tensor, m_dst_to_src: np.ndarray, out_h: int, out_w: int)
     channel, the coverage (1 inside ``src``, 0 outside).
     """
     sh, sw = src.shape[2:]
-    ys, xs = torch.meshgrid(
-        torch.arange(out_h, dtype=torch.float64),
-        torch.arange(out_w, dtype=torch.float64),
-        indexing="ij",
-    )
+    # The map is affine, so the normalised grid is a per-column term plus a
+    # per-row term; only their sum is built at full size (callers keep
+    # out_h × out_w bounded, see paste_face).
     m = torch.from_numpy(m_dst_to_src)
-    sx = m[0, 0] * xs + m[0, 1] * ys + m[0, 2]
-    sy = m[1, 0] * xs + m[1, 1] * ys + m[1, 2]
-    grid = torch.stack([2 * sx / max(sw - 1, 1) - 1, 2 * sy / max(sh - 1, 1) - 1], dim=-1)
-    grid = grid.unsqueeze(0).to(src.dtype)
+    norm = torch.tensor([2 / max(sw - 1, 1), 2 / max(sh - 1, 1)], dtype=torch.float64)
+    xs = torch.arange(out_w, dtype=torch.float64)
+    ys = torch.arange(out_h, dtype=torch.float64)
+    col = xs[:, None] * m[:, 0] * norm  # (out_w, 2)
+    row = (ys[:, None] * m[:, 1] + m[:, 2]) * norm - 1  # (out_h, 2)
+    grid = (row[:, None, :] + col[None, :, :]).to(src.dtype).unsqueeze(0)
     ones = torch.ones_like(src[:, :1])
     return F.grid_sample(
         torch.cat([src, ones], dim=1),
@@ -354,9 +355,17 @@ def paste_face(
         [torch.from_numpy(np.ascontiguousarray(change)).permute(2, 0, 1).unsqueeze(0), alpha],
         dim=1,
     ).float()
-    warped = _sample(src, region_to_face, y1 - y0, x1 - x0)
-    delta, a = warped[:, :3], warped[:, 3:4] * warped[:, 4:5]
-    base = torch.from_numpy(np.array(image[y0:y1, x0:x1])).permute(2, 0, 1)
-    base = base.unsqueeze(0).float()
-    out = base + a * delta
-    image[y0:y1, x0:x1] = out[0].permute(1, 2, 0).clamp(0, 255).add(0.5).to(torch.uint8).numpy()
+    # In row bands: a face filling a large photo would otherwise need several
+    # GB for the sampling grid and the warped 5-channel box.
+    band = max(1, PASTE_BAND_PIXELS // (x1 - x0))
+    for top in range(y0, y1, band):
+        bottom = min(y1, top + band)
+        band_to_face = _compose(region_to_face, np.array([[1.0, 0, 0], [0, 1.0, top - y0]]))
+        warped = _sample(src, band_to_face, bottom - top, x1 - x0)
+        delta, a = warped[:, :3], warped[:, 3:4] * warped[:, 4:5]
+        base = torch.from_numpy(np.array(image[top:bottom, x0:x1])).permute(2, 0, 1)
+        base = base.unsqueeze(0).float()
+        out = base + a * delta
+        image[top:bottom, x0:x1] = (
+            out[0].permute(1, 2, 0).clamp(0, 255).add(0.5).to(torch.uint8).numpy()
+        )

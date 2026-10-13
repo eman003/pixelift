@@ -399,6 +399,28 @@ def test_crop_and_paste_round_trip():
     assert np.array_equal(changed[5, 5], img[5, 5])  # far outside the face: untouched
 
 
+def test_paste_face_works_in_bounded_bands(monkeypatch):
+    """Paste-back samples row bands, never the whole (possibly huge) face box,
+    and the result matches a single-pass paste exactly."""
+    rng = np.random.default_rng(3)
+    img = rng.integers(0, 256, (600, 500, 3), dtype=np.uint8)
+    landmarks = faces.TEMPLATE * 0.9 + 20
+    m = faces.similarity_transform(landmarks, faces.TEMPLATE)
+    change = rng.uniform(-60, 60, (512, 512, 3)).astype(np.float32)
+    whole = img.copy()
+    faces.paste_face(whole, change, m, faces.ellipse_mask())
+    sizes = []
+    real = faces._sample
+    monkeypatch.setattr(
+        faces, "_sample", lambda s, mm, h, w: sizes.append(h * w) or real(s, mm, h, w)
+    )
+    monkeypatch.setattr(faces, "PASTE_BAND_PIXELS", 20_000)
+    banded = img.copy()
+    faces.paste_face(banded, change, m, faces.ellipse_mask())
+    assert len(sizes) > 3 and max(sizes) <= 20_000
+    assert np.array_equal(banded, whole) and not np.array_equal(whole, img)
+
+
 def test_identity_guard_and_weights():
     import torch
 

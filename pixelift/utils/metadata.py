@@ -6,11 +6,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from PIL import Image
+from PIL import Image, TiffImagePlugin
 
 log = logging.getLogger(__name__)
 
 ORIENTATION_TAG = 0x0112
+RESOLUTION_TAGS = (0x011A, 0x011B)  # XResolution, YResolution
 GPS_IFD_TAG = 0x8825
 # A TIFF's EXIF is its first image directory, which also describes the pixel
 # layout (size, strips, compression…). Only these descriptive tags carry over.
@@ -47,6 +48,25 @@ class ImageMetadata:
         if not self.dpi:
             return None
         return (self.dpi[0] * scale, self.dpi[1] * scale)
+
+    def scaled_exif(self, scale: int) -> bytes | None:
+        """The EXIF with X/YResolution multiplied by ``scale``, like ``scaled_dpi``
+        (otherwise EXIF and JFIF / pHYs would disagree about the print size)."""
+        if not self.exif or scale == 1:
+            return self.exif
+        try:
+            exif = Image.Exif()
+            exif.load(self.exif)
+            if not any(tag in exif for tag in RESOLUTION_TAGS):
+                return self.exif
+            for tag in RESOLUTION_TAGS:
+                if tag in exif:
+                    exif[tag] = TiffImagePlugin.IFDRational(float(exif[tag]) * scale)
+            return exif.tobytes()
+        except Exception:
+            # A stale resolution is better than losing the whole EXIF.
+            log.warning("Could not scale the EXIF resolution", exc_info=True)
+            return self.exif
 
 
 def extract_metadata(img: Image.Image) -> ImageMetadata:
@@ -134,11 +154,12 @@ def save_kwargs(
     elif fmt == "PNG":
         kwargs.update(compress_level=6)
     if meta is not None:
-        if meta.exif:
-            if fmt == "JPEG" and len(meta.exif) > JPEG_MAX_EXIF:
-                log.warning("EXIF data too large for JPEG (%d bytes); not copied", len(meta.exif))
+        exif = meta.scaled_exif(scale)
+        if exif:
+            if fmt == "JPEG" and len(exif) > JPEG_MAX_EXIF:
+                log.warning("EXIF data too large for JPEG (%d bytes); not copied", len(exif))
             else:
-                kwargs["exif"] = meta.exif
+                kwargs["exif"] = exif
         if meta.icc_profile:
             if mode is None or icc_matches_mode(meta.icc_profile, mode):
                 kwargs["icc_profile"] = meta.icc_profile

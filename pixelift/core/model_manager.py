@@ -7,15 +7,17 @@ import hashlib
 import http.client
 import logging
 import os
-import shutil
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
+from email.message import Message
 from pathlib import Path
+from typing import IO
 
 from pixelift import __version__
 from pixelift.core.control import JobControl
@@ -28,6 +30,7 @@ log = logging.getLogger(__name__)
 ProgressCallback = Callable[[int, int], None]  # (bytes_done, bytes_total)
 TEMP_PREFIX = ".download-"
 STALE_TEMP_SECONDS = 6 * 3600  # older temp files are left over from killed downloads
+SIZE_MARGIN = 1 << 20  # downloads this far past the expected size are aborted
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,37 @@ class ModelStatus:
     spec: ModelSpec
     installed: bool
     path: Path
+
+
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to https: a downgrade could be tampered with."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise urllib.error.HTTPError(
+                newurl, code, "refusing a redirect to a non-https URL", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_url(request: urllib.request.Request, timeout: float) -> IO[bytes]:
+    return urllib.request.build_opener(_HttpsOnlyRedirects).open(request, timeout=timeout)
+
+
+def _content_length(headers: Message, fallback: int) -> int:
+    try:
+        value = int(headers.get("Content-Length") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
 
 
 def sha256_file(path: Path, chunk: int = 1 << 20) -> str:
@@ -143,7 +177,11 @@ class ModelManager:
         with self._verified_lock:
             if key in self._verified:
                 return path
-        if sha256_file(path) != spec.sha256:
+        try:
+            digest = sha256_file(path)
+        except FileNotFoundError:  # removed in Settings while a job was starting
+            raise ModelNotInstalledError(f"{spec.name} is not installed.") from None
+        if digest != spec.sha256:
             log.error("Checksum mismatch for %s", path)
             raise ModelNotInstalledError(
                 f"The file for {spec.name} is damaged or is not the official release.",
@@ -162,21 +200,24 @@ class ModelManager:
     def install_file(self, spec: ModelSpec | str, source: Path) -> Path:
         """Install a manually downloaded weights file after verifying its checksum."""
         spec = self.spec(spec) if isinstance(spec, str) else spec
-        digest = sha256_file(source)
-        if digest != spec.sha256:
-            raise ModelDownloadError(
-                f"{source.name} does not match the expected checksum for {spec.name}.",
-                ["Download the file again from the official release page"],
-            )
         self.models_dir.mkdir(parents=True, exist_ok=True)
         target = self.path_for(spec)
         # Copy next to the target, then rename: an interrupted copy must not
-        # leave a truncated file that looks installed.
+        # leave a truncated file that looks installed. The bytes are hashed as
+        # they are copied, so a source changing meanwhile cannot slip through.
         fd, tmp_name = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=self.models_dir)
-        os.close(fd)
         tmp = Path(tmp_name)
+        digest = hashlib.sha256()
         try:
-            shutil.copyfile(source, tmp)
+            with os.fdopen(fd, "wb") as out, open(source, "rb") as src:
+                while block := src.read(1 << 20):
+                    digest.update(block)
+                    out.write(block)
+            if digest.hexdigest() != spec.sha256:
+                raise ModelDownloadError(
+                    f"{source.name} does not match the expected checksum for {spec.name}.",
+                    ["Download the file again from the official release page"],
+                )
             os.replace(tmp, target)
         except OSError as exc:
             raise _download_error(spec, exc) from exc
@@ -205,13 +246,21 @@ class ModelManager:
         try:
             with (
                 os.fdopen(fd, "wb") as out,
-                urllib.request.urlopen(request, timeout=timeout) as response,
+                _open_url(request, timeout) as response,
             ):
-                total = int(response.headers.get("Content-Length") or spec.size_bytes)
+                total = _content_length(response.headers, spec.size_bytes)
+                limit = spec.size_bytes + SIZE_MARGIN
                 done = 0
                 while block := response.read(1 << 16):
                     if control is not None:
                         control.check()
+                    if done + len(block) > limit:
+                        # The checksum is only known at the end; a bad mirror
+                        # must not be able to fill the disk first.
+                        raise ModelDownloadError(
+                            f"The download of {spec.name} is larger than expected.",
+                            ["Try downloading again", "Check your internet connection"],
+                        )
                     out.write(block)
                     digest.update(block)
                     done += len(block)

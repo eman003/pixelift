@@ -144,9 +144,28 @@ def test_install_manual_file(tmp_path, tiny_specs, models_dir):
         mgr.install_file(spec, other)
 
 
+class FakeResponse:
+    """Stands in for the HTTP response: serves ``body`` with ``headers``."""
+
+    def __init__(self, body: bytes, headers: dict | None = None) -> None:
+        self.headers = types.MappingProxyType(headers or {})
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self, n):
+        block, self._body = self._body[:n], self._body[n:]
+        return block
+
+
 def test_download_dropped_connection_is_a_download_error(tmp_path, tiny_specs, monkeypatch):
     import http.client
-    import urllib.request
+
+    import pixelift.core.model_manager as mm
 
     class Dropping:
         headers = types.MappingProxyType({})
@@ -160,7 +179,7 @@ def test_download_dropped_connection_is_a_download_error(tmp_path, tiny_specs, m
         def read(self, _n):
             raise http.client.IncompleteRead(b"partial", 100)
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: Dropping())
+    monkeypatch.setattr(mm, "_open_url", lambda *_a, **_k: Dropping())
     mgr = ModelManager(tmp_path / "dl", [tiny_specs["x4"]])
     with pytest.raises(ModelDownloadError, match="Could not download"):
         mgr.download(tiny_specs["x4"])
@@ -168,16 +187,28 @@ def test_download_dropped_connection_is_a_download_error(tmp_path, tiny_specs, m
 
 
 def test_install_manual_file_is_atomic(tmp_path, tiny_specs, models_dir, monkeypatch):
-    import shutil
+    import os
 
     spec = tiny_specs["x4"]
     mgr = ModelManager(tmp_path / "manual", [spec])
+    real_fdopen = os.fdopen
 
-    def interrupted(_src, dst):
-        Path(dst).write_bytes(b"trunc")
-        raise OSError(28, "No space left on device")
+    class Full:
+        def __init__(self, fd, mode):
+            self._out = real_fdopen(fd, mode)
 
-    monkeypatch.setattr(shutil, "copyfile", interrupted)
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            self._out.close()
+            return False
+
+        def write(self, block):
+            self._out.write(block[:5])
+            raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(os, "fdopen", Full)
     with pytest.raises(ModelDownloadError, match="disk space"):
         mgr.install_file(spec, models_dir / spec.filename)
     assert not mgr.is_installed(spec)
@@ -197,3 +228,90 @@ def test_stale_partial_downloads_are_removed(tmp_path, tiny_specs):
     os.utime(old, (long_ago, long_ago))
     ModelManager(folder, [tiny_specs["x4"]])
     assert not old.exists() and fresh.exists()  # a running download may own it
+
+
+def test_install_manual_file_hashes_the_bytes_it_copies(
+    tmp_path, tiny_specs, models_dir, monkeypatch
+):
+    """The source is swapped right after it is first opened: what gets
+    installed must be exactly the bytes that were verified."""
+    import os
+
+    import pixelift.core.model_manager as mm
+
+    spec = tiny_specs["x4"]
+    good = (models_dir / spec.filename).read_bytes()
+    source = tmp_path / "src.pth"
+    source.write_bytes(good)
+    real_open = open
+
+    def swapping_open(path, mode="r", *args, **kwargs):
+        handle = real_open(path, mode, *args, **kwargs)
+        if Path(path) == source:
+            swapped = tmp_path / "swapped.pth"
+            swapped.write_bytes(b"not the verified weights")
+            os.replace(swapped, source)
+        return handle
+
+    monkeypatch.setattr(mm, "open", swapping_open, raising=False)
+    mgr = ModelManager(tmp_path / "manual", [spec])
+    assert mgr.install_file(spec, source).read_bytes() == good
+
+
+def test_ensure_verified_file_removed_while_hashing(manager, tiny_specs, monkeypatch):
+    import pixelift.core.model_manager as mm
+
+    def vanished(path):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(mm, "sha256_file", vanished)
+    with pytest.raises(ModelNotInstalledError, match="not installed"):
+        manager.ensure_verified(tiny_specs["x4"])
+
+
+def test_download_aborts_when_larger_than_expected(tmp_path, tiny_specs, monkeypatch):
+    import pixelift.core.model_manager as mm
+
+    spec = tiny_specs["x4"]
+    body = b"x" * (spec.size_bytes + mm.SIZE_MARGIN + 1)
+    written = []
+    monkeypatch.setattr(mm, "_open_url", lambda *_a, **_k: FakeResponse(body))
+    mgr = ModelManager(tmp_path / "dl", [spec])
+    with pytest.raises(ModelDownloadError, match="larger than expected"):
+        mgr.download(spec, lambda done, _total: written.append(done))
+    assert written[-1] <= spec.size_bytes + mm.SIZE_MARGIN
+    assert not list((tmp_path / "dl").iterdir())
+
+
+def test_download_tolerates_malformed_content_length(tmp_path, tiny_specs, models_dir, monkeypatch):
+    import pixelift.core.model_manager as mm
+
+    spec = tiny_specs["x4"]
+    body = (models_dir / spec.filename).read_bytes()
+    response = FakeResponse(body, {"Content-Length": "12, 34"})
+    monkeypatch.setattr(mm, "_open_url", lambda *_a, **_k: response)
+    progress = []
+    mgr = ModelManager(tmp_path / "dl", [spec])
+    assert mgr.download(spec, lambda d, t: progress.append((d, t))).is_file()
+    assert progress[-1] == (spec.size_bytes, spec.size_bytes)
+
+
+def test_redirects_to_plain_http_are_refused():
+    import email.message
+    import io
+    import urllib.error
+    import urllib.request
+
+    import pixelift.core.model_manager as mm
+
+    handler = mm._HttpsOnlyRedirects()
+    request = urllib.request.Request("https://example.org/model.pth")
+    headers = email.message.Message()
+    with pytest.raises(urllib.error.HTTPError, match="non-https"):
+        handler.redirect_request(
+            request, io.BytesIO(), 302, "Found", headers, "http://example.org/model.pth"
+        )
+    followed = handler.redirect_request(
+        request, io.BytesIO(), 302, "Found", headers, "https://cdn.example.org/model.pth"
+    )
+    assert followed.full_url == "https://cdn.example.org/model.pth"

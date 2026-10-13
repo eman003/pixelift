@@ -219,3 +219,67 @@ def test_cli_strip_location(tmp_path, tiny_specs):
     with Image.open(out_dir / "gps_4x.png") as img:
         assert img.getexif()[0x010F] == "Camera Maker"
         assert not img.getexif().get_ifd(0x8825)
+
+
+def test_cli_missing_or_unsupported_input_fails_the_run(
+    image_factory, tiny_specs, tmp_path, capsys
+):
+    src = image_factory("photo.jpg")
+    gif = tmp_path / "anim.gif"
+    gif.write_bytes(b"GIF89a")
+    args = [str(src), str(tmp_path / "typo.png"), str(gif), "-m", "test-x4", "--device", "cpu"]
+    assert cli.run_cli(args + ["-o", str(tmp_path / "out")]) == 1
+    captured = capsys.readouterr()
+    assert "1 upscaled" in captured.out  # the good photo is still done
+    assert "typo.png: file not found" in captured.err
+    assert "anim.gif: not a supported image format" in captured.err
+
+
+@pytest.mark.parametrize("size", ["1", "63", "-5", "big"])
+def test_cli_rejects_unusable_tile_sizes(image_factory, size, capsys):
+    src = image_factory("photo.jpg")
+    with pytest.raises(SystemExit) as exc:
+        cli.run_cli([str(src), "--tile-size", size])
+    assert exc.value.code == 2
+    assert "--tile-size" in capsys.readouterr().err
+
+
+def test_cli_explicit_format_wins_over_the_apps_hdr_range(image_factory, tiny_specs, tmp_path):
+    settings_ = load_settings()
+    settings_.output_range = "hdr"
+    save_settings(settings_)
+    src = image_factory("photo.png")
+    out = tmp_path / "out"
+    assert cli.run_cli([str(src), "-m", "test-x4", "-f", "jpg", "-o", str(out)]) == 0
+    assert [p.suffix for p in out.iterdir()] == [".jpg"]
+
+
+def test_cli_format_with_hdr_range_is_an_error(image_factory, capsys):
+    src = image_factory("photo.png")
+    with pytest.raises(SystemExit) as exc:
+        cli.run_cli([str(src), "-f", "jpg", "--dynamic-range", "hdr"])
+    assert exc.value.code == 2
+    assert "--hdr-format" in capsys.readouterr().err
+
+
+def test_cli_skips_results_inside_the_output_folder(image_factory, tiny_specs, tmp_path):
+    src = image_factory("photo.png")
+    out = src.parent / "results"
+    args = [str(src.parent), "-m", "test-x4", "-o", str(out), "--device", "cpu"]
+    assert cli.run_cli(args) == 0
+    assert cli.run_cli(args + ["--overwrite"]) == 0
+    assert sorted(p.name for p in out.iterdir()) == ["photo_4x.png"]
+
+
+def test_cli_rejects_negative_threads(image_factory):
+    with pytest.raises(SystemExit):
+        cli.run_cli([str(image_factory("photo.png")), "--threads", "-1"])
+
+
+def test_failed_settings_save_leaves_no_temp_file(tmp_path, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("json.dump", fail)
+    save_settings(Settings(), tmp_path / "settings.json")
+    assert list(tmp_path.iterdir()) == []

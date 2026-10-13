@@ -29,7 +29,12 @@ colour casts, faces, and optional colorization of black-and-white photos.
 ## Features
 
 - Drag-and-drop or file picker; single files, multiple files or whole folders
-- PNG, JPEG, WebP, TIFF and BMP input; PNG, JPEG or WebP output
+- PNG, JPEG, WebP, AVIF, TIFF and BMP input; PNG, JPEG or WebP output
+- **True HDR output**: PQ or HLG in Rec. 2020 (or Display P3) as 16-bit PNG
+  (cICP) or 10-bit AVIF with transparency, or Ultra HDR gain-map JPEG,
+  verified after writing; HDR sources (PQ/HLG PNG or AVIF, OpenEXR, Radiance
+  .hdr, Ultra HDR JPEG) keep their range through the AI upscaler — see
+  [HDR output](#hdr-output)
 - 2× and 4× upscaling, several Real-ESRGAN models (photo, fast, anime)
 - NVIDIA (CUDA), AMD (ROCm) and Intel (XPU) GPU acceleration, with a reliable
   CPU fallback — GPUs are never required
@@ -63,6 +68,7 @@ colour casts, faces, and optional colorization of black-and-white photos.
 | RAM | 8 GB recommended; very large 4× results need more (Pixelift checks before starting) |
 | Disk | ~1 GB for the app with PyTorch (CPU), plus 5–70 MB per model |
 | GPU | Optional — see [GPU acceleration](#gpu-acceleration) |
+| ffmpeg | Optional — reading HDR sources and writing HDR AVIF (see [HDR output](#hdr-output)) |
 
 ## Installation
 
@@ -194,7 +200,8 @@ sidebar (**F9** shows or hides it) — and the dock at the bottom.
 
 Results go to `<original folder>/upscaled/` by default, named with the template
 `{name}_{scale}x` (e.g. `photo.jpg → photo_4x.png`). Template fields: `{name}`,
-`{scale}`, `{model}`, `{width}`, `{height}`, `{ext}`, `{lighting}`, `{look}`.
+`{scale}`, `{model}`, `{width}`, `{height}`, `{ext}`, `{lighting}`, `{look}`,
+`{hdr}`.
 
 When several images in one batch would get the same output name (e.g.
 `photo.jpg` and `photo.png`), the one earlier in the queue gets `photo_4x.png`
@@ -296,6 +303,232 @@ Like the lighting, the look is part of the output name —
 `photo_4x_fujifilm-velvia-50.png`, `…-grain-high` with a grain choice, a short
 hash for Custom and saved looks — and changing it re-queues finished images.
 
+### HDR Enhancement
+
+**HDR Enhancement** (the **HDR** tab, Upscale mode) widens the *perceived*
+dynamic range of the upscaled photo: it opens up shadows, compresses bright
+skies and windows so their detail shows, and adds local contrast. Turn it on
+with the switch, pick a profile and set the intensity; the stage previews it
+live, and **Compare** shows it against the original.
+
+| Profile | Default | Effect |
+|---|---|---|
+| Natural HDR | 60 % | Gentle shadow and highlight recovery; looks untouched |
+| Balanced HDR | 65 % | Open shadows, protected highlights, crisper local contrast |
+| Dramatic HDR | 70 % | Strong local contrast and deep tonal range for a bold look |
+
+*Intensity* scales the profile (each profile starts at its own default when
+chosen); 0 % is exactly the upscaled image. **Advanced** (the gear button)
+fine-tunes Shadow Recovery, Highlight Protection, Local Contrast and Colour
+around the profile. Switch HDR off (or **Reset**) to get the unenhanced result
+back.
+
+How it works: an edge-aware base layer (a guided filter on a small copy of the
+photo, followed at full resolution) is tone-mapped — dark areas lifted, bright
+areas compressed — and the photo's own detail is added back on top, with
+medium-scale detail boosted (local contrast) and fine detail and noise left at
+their strength. Following edges keeps halos away from horizons and
+silhouettes; all curves keep black and white fixed, so nothing new clips or
+crushes; colour follows the brightness change only partly, and greys stay grey.
+
+HDR runs **after** the AI model. In tests on dark, low-quality and high-contrast
+photos this gave less noise in the shadows than enhancing first (the model
+treated boosted JPEG artefacts as detail). It also means that while HDR is on,
+the app keeps the upscaled image in a cache (`~/.cache/pixelift/upscaled`, at
+most 4 GB, oldest first out): change the HDR profile, intensity or advanced
+settings (or switch HDR off) and click **Upscale** again, and the photo is
+redone in seconds without running the AI model again. The cache is keyed by
+the model's weights, tile size and device, so it is never reused for a
+different upscale. Batches too large for the cache, and the command line,
+don't fill it. **Preferences → Performance → Storage** shows its size and
+clears it.
+
+The output is an ordinary 8-bit SDR file in the format you chose, with an
+`_hdr-<profile>-<intensity>` tag in its name (`photo_4x_hdr-natural-60.png`)
+so it never overwrites the plain result. It is not an HDR (PQ/HLG or
+high-bit-depth) image and is not labelled as one. Shadows and highlights can
+only be revealed as far as the source recorded them: blown-out whites stay
+white, and very dark areas of an 8-bit photo hold few levels, so lifting them
+reveals noise and compression blocks rather than lost detail. Nothing is
+invented.
+
+### HDR output
+
+**HDR output** (Export tab → **Range: HDR**) writes real HDR files instead of
+SDR ones. This is separate from [HDR Enhancement](#hdr-enhancement), which is
+an SDR look. Pixelift's HDR files are:
+
+| | |
+|---|---|
+| Transfer function | SMPTE ST 2084 (**PQ**, default) or **HLG**, both ITU-R BT.2100 |
+| Colour space | **Rec. 2020** (default) or Display P3 (PQ only), D65 white |
+| File format | **16-bit PNG** with a `cICP` chunk (default), **10-bit AVIF** (4:4:4), or **Ultra HDR JPEG** (sRGB base + gain map) |
+| Metadata | `cICP` 9/16/0/1 or 9/18/0/1 (PNG); `nclx` 9/16/9 or 9/18/9, full range (AVIF); `cLLi` light level (PQ PNG); `hdrgm` XMP + MPF (JPEG) |
+| Transparency | PNG (16-bit alpha) and AVIF (10-bit alpha item); not JPEG |
+| Peak luminance | PQ and Ultra HDR: 1000 cd/m² by default, 400–10000 adjustable; HLG: its 1000 cd/m² reference display |
+
+**What counts as HDR here.** A file is only HDR if its pixels are encoded with
+an HDR transfer function *and* the file says so. Brightening, 16 bits or a wide
+gamut alone do not make a file HDR. Every HDR file Pixelift writes is read back
+before the job reports success: the PNG chunks (CRC-checked, image data fully
+inflated) or AVIF boxes are parsed to confirm the size, bit depth, transfer
+function, primaries, range and alpha. AVIF files are also decoded back and
+their planes compared with the ones that were encoded. Ultra HDR JPEGs have
+their MPF offsets, XMP directory and gain-map metadata checked, and both images
+are decoded. When ffmpeg is installed, `ffprobe` (an independent decoder) must
+also report the expected transfer (`smpte2084` / `arib-std-b67`) and primaries. If any check fails, the file
+is deleted and the job fails with the reason. HDR export never quietly falls
+back to SDR.
+
+**Native HDR vs SDR-to-HDR conversion.** The status line under the Range
+buttons says which one applies to the selected photo:
+
+- *SDR source → HDR conversion*: an ordinary photo is placed in an HDR
+  container. Its pixels are decoded with the embedded ICC profile (sRGB without
+  one; matrix/TRC profiles such as Display P3, Adobe RGB and ProPhoto keep
+  their wide gamut) and converted to linear Rec. 2020. SDR white is placed at
+  **203 cd/m²**, the ITU-R BT.2408 HDR reference white (adjustable: Advanced →
+  SDR white). The picture then looks the same as the SDR original on an HDR
+  display; it gains no highlight or shadow detail, because the file never had
+  any. **Expand highlights** (off by default) stretches only the brightest
+  tones (above 60 % linear, about sRGB 80 %) up to at most 4× SDR white. This is
+  a creative inverse tone mapping, not a recovery: clipped areas become bright,
+  flat areas.
+- *HDR source → HDR output*: HDR files keep their range. They are recognised
+  by their colour description, not their extension: PNG or AVIF whose
+  `cICP`/`nclx` says PQ or HLG, OpenEXR (`.exr`), Radiance RGBE (`.hdr`) and
+  gain-map JPEGs (Ultra HDR, Adobe `hdrgm` XMP). Scene-linear EXR/RGBE values
+  of 1.0, and SDR white in gain-map JPEGs, are placed at the SDR white level.
+  An EXR `chromaticities` attribute (for example ACES or P3 primaries) is
+  honoured, with other white points adapted to D65 (Bradford). HLG is decoded
+  with the BT.2100 OOTF for a 1000 cd/m² display, and gain-map JPEGs are rebuilt
+  at full weight (their complete HDR rendition).
+- *HDR source → SDR (tone-mapped)*: with Range set to SDR, HDR sources are
+  tone-mapped (BT.2390 roll-off to 203 cd/m², Rec. 2020 → sRGB, gamut fitted).
+  The status line warns that the HDR range will be discarded. Gain-map JPEGs
+  (Ultra HDR phone photos) are the exception: with SDR output, and in previews
+  and thumbnails, their own SDR picture is used unchanged. A gain map Pixelift
+  cannot use (for example `BaseRenditionIsHDR`) also falls back to that SDR
+  picture, and the job's note says so. The SDR view never depends on the SDR
+  white setting, which only affects HDR output.
+
+**Inside the pipeline** (`pixelift/core/hdr_output/`):
+
+```text
+SDR source:  decode (8-bit) → lighting → look → AI model → HDR Enhancement → look finish
+             → linearise (ICC / sRGB) → Rec. 2020 → ×(SDR white / 203) → [expand highlights]
+HDR source:  decode (ffmpeg, float; gain-map JPEG: Pillow) → PQ/HLG/linear/gain map
+             → absolute cd/m² → linear Rec. 2020
+             → invertible proxy (16-bit) → AI model (16-bit) → exact inverse
+both:        → BT.2390 roll-off above the peak → output primaries (+ gamut fit)
+             → PQ or HLG encode → 16-bit PNG / 10-bit AVIF, band by band
+               (or: SDR base + per-channel gain map → Ultra HDR JPEG)
+             → verify → rename into place
+```
+
+- Working values are linear-light Rec. 2020 floats where **1.0 = 203 cd/m²**,
+  never clipped to 1. Encoded values (sRGB, PQ, HLG signals) are kept separate
+  from linear values, so no transfer function is applied twice. PQ maths runs
+  in float64 for each band of rows.
+- Out-of-gamut colours (sources wider than the output, or negative EXR
+  values) are desaturated towards their own luminance just far enough to fit.
+  Luminance and hue are kept.
+- Highlights brighter than the chosen peak are rolled off with the ITU-R
+  BT.2390 EETF, applied to the largest RGB component so hue is kept. Below about
+  half the peak's PQ signal nothing changes. No pixel above the peak is ever
+  written.
+- HLG is written as BT.2100 / BT.2408 display-light conversion: inverse OOTF
+  for the 1000 cd/m² reference display (system gamma 1.2), then the HLG OETF,
+  so 203 cd/m² becomes the 75 % signal. HLG cannot represent bright, saturated
+  colours whose scene value would exceed 1; those are desaturated towards
+  their luminance (kept exactly) instead of being clipped channel by channel.
+- Ultra HDR JPEG (Adobe gain map 1.0, as used by Android): the primary image is
+  an ordinary sRGB JPEG, the SDR rendition (the BT.2390 tone mapping, or the
+  untouched picture when there is nothing above SDR white), which every viewer
+  shows. A second, quarter-size JPEG holds per-channel log2 gains, linked
+  through an MPF `APP2` segment and an XMP `Container:Directory`. Its `hdrgm`
+  XMP carries `GainMapMin`/`Max`, `Gamma` 1, offsets 1/64, `HDRCapacityMin` 0
+  and `HDRCapacityMax` (the picture's own headroom). HDR colours outside sRGB
+  are fitted into sRGB. ISO 21496-1 binary metadata is not written or read.
+- `cLLi` (MaxCLL, MaxFALL) is measured from the written pixels (PQ only). No mastering
+  display metadata (`mDCv`) is written, because Pixelift does not know what
+  display a picture was graded on. No ICC profile, `gAMA` or `sRGB` chunk is
+  written alongside `cICP`, so nothing contradicts it.
+
+**HDR and the AI model.** The Real-ESRGAN models were trained on 8-bit SDR
+photos: they expect values in 0..1 and clamp their output to it. They cannot
+take HDR values directly.
+
+- **SDR sources** are upscaled exactly as before (8 bits). The conversion to
+  HDR happens after the model, so the model sees what it was trained on.
+- **HDR sources** go through an *invertible proxy*. Everything up to about
+  100 cd/m² is passed through linearly, and brighter tones are compressed
+  logarithmically so the picture's peak maps to 1.0. This is applied to the
+  largest RGB component, so hue is kept, then sRGB-encoded at **16 bits**. The
+  upscaler accepts 16-bit input and returns 16-bit output, so nothing goes
+  through 8 bits. The model's output is mapped back through the exact inverse.
+  With a model that changed nothing, the original HDR values come back (tested
+  to within 0.2 % at the 99.9th percentile). Sharpening and texture the model
+  adds in the highlights are expanded along with them.
+- Limitation: the model was not trained on compressed highlights, so its
+  detail reconstruction there may be weaker than in mid-tones. Upscaling cannot
+  create highlight information the source did not contain.
+- Lighting, Camera Looks and HDR Enhancement are SDR tools. They are **not
+  applied** to HDR sources written as HDR (the job's note says so, and the live
+  preview leaves them off for those photos). Photo restoration always writes
+  SDR.
+- The upscale is cached (`~/.cache/pixelift/upscaled`, as for HDR
+  Enhancement; HDR proxies as 16-bit). Changing the peak, colour space, SDR
+  white (except for EXR/RGBE sources) or format re-encodes without running the
+  AI model again.
+
+**Preview.** The stage shows an **SDR rendition** of HDR results and HDR
+sources: the same BT.2390 tone mapping, labelled *HDR file, SDR preview* /
+*Original · HDR, SDR preview*. It is never presented as an HDR display. The
+preview is decoded from the written file and never modifies it. Pixelift
+cannot present HDR directly yet: that needs GTK ≥ 4.16 colour-state support
+plus a compositor and display with HDR enabled (on Linux, a Wayland session
+with the colour-management protocol). The tested target (GTK 4.14, X11) has
+neither, so an HDR presentation path could be neither built nor tested here,
+and none is shipped. Open the exported file in an HDR-capable viewer (for example a
+Chromium-based browser on an HDR display) to see it in HDR.
+
+**Formats compared**
+
+| | 16-bit PNG + cICP | 10-bit AVIF | Ultra HDR JPEG |
+|---|---|---|---|
+| Encoder | built in (zlib) | ffmpeg with libaom-av1 (optional) | built in (Pillow) |
+| Transfer | PQ or HLG | PQ or HLG | gain map over an sRGB base |
+| Compression | lossless | lossy (Quality), ~5–10× smaller | lossy (Quality) |
+| Transparency | yes (16-bit) | yes (10-bit alpha item) | no (dropped, with a note) |
+| Light level | `cLLi` (PQ) | no | n/a (`HDRCapacityMax`) |
+| EXIF, DPI | yes (`eXIf`, `pHYs`) | no | EXIF |
+| On SDR-only viewers | washed out if `cICP` is ignored | washed out if `nclx` is ignored | the normal SDR picture |
+| Verified with | Pixelift's parser; ffprobe/ffmpeg 6.1 (exact pixel match); Pillow; headless Chrome 152 | Pixelift's parser + plane readback; ffprobe; Pillow/libavif (incl. alpha); headless Chrome 152 | Pixelift's parser + decoder; Pillow's MPF parser and JPEG decoder; headless Chrome 152 (base rendition) |
+
+**Viewer check (Chrome).** On this SDR machine, headless Chrome 152 decoded
+the PQ and HLG PNGs and AVIFs to the same picture, with the 26 : 203 cd/m²
+luminance ratio intact (0.130 measured, 0.128 expected). The same samples
+without `cICP` read back as the raw signal. This shows Chrome honours the
+colour descriptions. It does not show how any file looks on an HDR display,
+and whether Chrome applies the Ultra HDR gain map could not be observed:
+without an HDR display it correctly shows the base. Run it again with
+`PIXELIFT_TEST_CHROME=1 pytest -k chrome`.
+
+**Requirements.** Writing HDR PNG and Ultra HDR JPEG needs nothing extra.
+Writing HDR AVIF, and reading HDR PNG/AVIF/EXR/RGBE sources, needs **ffmpeg**
+(`sudo apt install ffmpeg`; `ffmpeg -encoders | grep libaom` must list
+`libaom-av1`). Pillow reduces 16-bit RGB to 8 bits and cannot read PQ, EXR or
+RGBE. Without ffmpeg, those sources fail with an explanation instead of being
+read wrongly, and AVIF is shown as unavailable. Gain-map JPEGs are read with
+Pillow alone. The `.deb` recommends ffmpeg. The Flatpak runtime does not
+include it.
+
+Inspect any PNG, AVIF or JPEG from the command line with
+`pixelift --inspect-hdr FILE`. It prints the H.273 code points, bit depth,
+alpha and light levels (or the gain map's headroom), and exits with 0 for HDR
+(PQ, HLG or gain map) and 3 for anything else.
+
 ### Photo restoration
 
 Click **Restore Photos** in the header bar, add old scans and press
@@ -377,6 +610,14 @@ pixelift ./photos \
 
 pixelift portrait.jpg --lighting golden-hour --lighting-intensity 60
 pixelift portrait.jpg --look portra --look-intensity 70 --grain low
+pixelift landscape.jpg --hdr balanced --hdr-intensity 50
+
+# HDR output (PQ): SDR → HDR conversion, or native HDR sources kept as HDR
+pixelift photo.jpg --dynamic-range hdr
+pixelift scene.exr --dynamic-range hdr --hdr-format avif --hdr-peak 1000
+pixelift photo.jpg --dynamic-range hdr --hdr-transfer hlg
+pixelift phone_photo.jpg --dynamic-range hdr --hdr-format jpeg   # Ultra HDR out
+pixelift --inspect-hdr upscaled/photo_4x_pq1000.png
 
 # Photo restoration
 pixelift --restore old_photos/
@@ -400,6 +641,16 @@ pixelift --restore --restore-level heavy --face strong --fidelity 30 damaged.tif
 | `--look-intensity 0-100` | Look strength (not used with `custom`) |
 | `--grain auto\|off\|low\|medium\|high` | Film grain (`auto` = the look's own) |
 | `--list-looks` | List the camera looks and your saved looks |
+| `--hdr off\|natural\|balanced\|dramatic` | HDR Enhancement after upscaling (default: the app's setting). The profile selected in the app keeps its Advanced settings; others are used as designed |
+| `--hdr-intensity 0-100` | HDR strength (default: the profile's own); needs an HDR profile |
+| `--dynamic-range sdr\|hdr` | Output dynamic range (default: the app's setting); `hdr` writes PQ files and ignores `--format` |
+| `--hdr-format png\|avif\|jpeg` | HDR file format: 16-bit PNG, 10-bit AVIF (needs ffmpeg with libaom-av1) or Ultra HDR gain-map JPEG |
+| `--hdr-transfer pq\|hlg` | Transfer function for PNG/AVIF (HLG: Rec. 2020, 1000 cd/m² reference) |
+| `--hdr-colour-space bt2020\|p3` | HDR primaries (default Rec. 2020) |
+| `--hdr-peak NITS` | Brightest luminance written, 400–10000 cd/m² (default 1000) |
+| `--sdr-white NITS` | Where SDR white (and 1.0 in EXR/.hdr) is placed, 100–400 cd/m² (default 203) |
+| `--expand-highlights` | SDR sources: stretch the brightest tones (creative, not a recovery) |
+| `--inspect-hdr FILE` | Print an HDR PNG/AVIF/JPEG's colour description and exit |
 | `--overwrite` / `--rename` | What to do if the output exists (default: skip) |
 | `--no-metadata` | Don't copy EXIF/ICC |
 | `--strip-location` | Copy EXIF but leave out GPS location (`--no-strip-location` overrides the setting) |
@@ -487,9 +738,16 @@ pixelift/
 ├── core/                ── no GTK imports anywhere in here ──
 │   ├── upscaler.py      Upscaler ABC + TorchUpscaler (tiling, OOM recovery, CPU fallback)
 │   ├── tiling.py        tile layout + seam feathering (pure numpy)
-│   ├── image_processor.py  load → lighting → look → upscale → look finish → save (one image)
+│   ├── image_processor.py  load → lighting → look → upscale → HDR → look finish → save (one image)
 │   ├── lighting.py      lighting profiles and adjustments (pure numpy)
 │   ├── camera_looks.py  camera looks: recipes, 3D-LUT grade, grain (numpy + Pillow)
+│   ├── hdr.py           HDR Enhancement: guided-filter local tone mapping (numpy + Pillow)
+│   ├── upscale_cache.py cached upscales, so HDR changes skip the AI model
+│   ├── hdr_output/      true HDR output (no GTK, no PyTorch)
+│   │   ├── colour.py       PQ, HLG (both ways), sRGB, primaries, ICC, gamut fit, BT.2390, AI proxy
+│   │   ├── codecs.py       16-bit PNG + cICP writer, PNG/AVIF inspectors, ffmpeg AVIF + HDR decoding
+│   │   ├── gainmap.py      Ultra HDR gain-map JPEG: hdrgm XMP, MPF container, read + write
+│   │   └── pipeline.py     settings, SDR→HDR conversion, HDR sources, band-wise encode + verify
 │   ├── restoration/     AI photo restoration (no GTK)
 │   │   ├── settings.py     levels, presets, stages, file-name tag (no PyTorch)
 │   │   ├── analysis.py     B&W detection, noise and levels measurement (no PyTorch)
@@ -522,6 +780,10 @@ profile.
 `pixelift/core/camera_looks.py` with a `LookRecipe` (lighting adjustments plus
 roll-off, fade, colour bands, toning, clarity, sharpening, grain, skin
 protection); the gallery, settings and CLI list every registered look.
+
+**Adding an HDR profile:** call `register_profile(HdrProfile(...))` in
+`pixelift/core/hdr.py` with an `HdrRecipe` and a default intensity; the app,
+settings and CLI list every registered profile.
 
 **Adding a restoration stage:** add a function to `core/restoration/` that
 takes and returns an RGB `uint8` array, call it from `Restorer.restore` at the
@@ -557,11 +819,22 @@ elsewhere, run `flatpak override --user --filesystem=home io.github.pixelift.Pix
 
 ### Known limitations
 
-- 16-bit and floating-point images are processed at 8-bit precision.
+- SDR 16-bit and floating-point images (TIFF, 16-bit PNG without an HDR
+  `cICP`) are processed at 8-bit precision. HDR sources keep their precision
+  (see [HDR output](#hdr-output)).
+- HDR output: no HDR presentation on the stage (an SDR rendition is shown);
+  HLG only in Rec. 2020; AVIF without EXIF or light-level metadata; Ultra HDR
+  JPEG with an sRGB base only, no ISO 21496-1 binary metadata, and no
+  HDR-display check of its gain map; HEIC sources and gain maps carried only
+  in ISO 21496-1 or Apple's own format are not recognised as HDR; AVIF
+  rotation/mirroring (`irot`/`imir`) is not applied; photo restoration writes
+  SDR.
 - Very large outputs (≈ 100+ megapixels) need several GB of RAM for the final
   image buffer; Pixelift refuses jobs that would not fit instead of crashing.
 - When zoomed into a huge result, the preview decodes the visible region from
-  disk on demand, which can take a moment for very large PNGs.
+  disk on demand, which can take a moment for very large PNGs. Previews of
+  HDR files decode the whole file through ffmpeg (about 40 bytes per pixel of
+  memory while decoding); the two most recent are kept for zooming.
 - Photo restoration: dust and scratch removal tell damage from detail by
   shape, contrast, density and surroundings, but tiny isolated bright details
   (catchlights in very small eyes, the stripes of a lapel pin) can look exactly
@@ -576,6 +849,12 @@ elsewhere, run `flatpak override --user --filesystem=home io.github.pixelift.Pix
 - Face restoration needs faces at least ~10 px between the eyes; profile views
   and heavily obscured faces may not be detected. Restoring dozens of faces on
   a CPU takes a few seconds per face.
+- HDR Enhancement is an HDR-*like* enhancement of 8-bit SDR images; it cannot
+  recover clipped highlights or crushed shadows, and output files are SDR
+  (combine it with HDR output for a PQ file of the enhanced picture).
+  It is available in Upscale mode, not with photo restoration. The live
+  preview applies it to the original at preview size, so fine detail in the
+  final file comes from the AI model, as with lighting and looks.
 - The restoration preview works on a reduced-size copy (no upscaling), so it
   shows the look, not the final detail.
 

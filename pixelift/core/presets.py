@@ -6,6 +6,11 @@ lighting profile and intensity, the camera look, its intensity and grain, and
 lighting, camera look and restoration code do the work, so improvements there
 improve the presets too. Presets never change the scale, model or file format.
 
+HDR Enhancement (Upscale mode only) is part of the look too: a preset that
+does not set ``hdr_enabled`` means it off, so choosing Original really gives
+the photo as it is, and turning HDR Enhancement on shows the preset as
+modified. In Restore Photos, where it does not apply, it is left alone.
+
 A preset is a starting point: every value stays editable, and the preset then
 shows as modified (``Natural · Modified``) until it is chosen again.
 """
@@ -134,18 +139,26 @@ def get_preset(preset_id: str) -> Preset:
     return _BY_ID[preset_id]
 
 
+def _values(settings: Any, preset_id: str) -> dict[str, Any]:
+    """The preset's values in the settings' mode: HDR Enhancement off in Upscale
+    unless the preset sets it (Restore Photos does not use it)."""
+    values = dict(_BY_ID[preset_id].values)
+    if getattr(settings, "mode", UPSCALE) == UPSCALE:
+        values.setdefault("hdr_enabled", False)
+    return values
+
+
 def apply(settings: Any, preset_id: str) -> None:
     """Write a preset's values into ``settings`` and remember the choice."""
-    preset = _BY_ID[preset_id]
-    for name, value in preset.values.items():
+    for name, value in _values(settings, preset_id).items():
         setattr(settings, name, value)
     settings.preset = preset_id
 
 
 def matches(settings: Any, preset_id: str) -> bool:
     """Whether ``settings`` still hold every value of the preset."""
-    preset = _BY_ID[preset_id]
-    return all(getattr(settings, name) == value for name, value in preset.values.items())
+    values = _values(settings, preset_id)
+    return all(getattr(settings, name) == value for name, value in values.items())
 
 
 def status(settings: Any) -> tuple[str, bool]:

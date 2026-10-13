@@ -4,6 +4,59 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **HDR Enhancement** (the **HDR** tab, `--hdr`, `--hdr-intensity`): HDR-like
+  shadow recovery, highlight compression and local contrast for the upscaled
+  photo, with Natural, Balanced and Dramatic profiles, an intensity slider
+  (0 % is the untouched upscale) and Advanced fine-tuning. Edge-aware, so no
+  halos; nothing new clips or crushes; previewed live on the stage. Results
+  are ordinary SDR files tagged `_hdr-<profile>-<intensity>`.
+- While HDR is on, the app caches the upscaled image
+  (`~/.cache/pixelift/upscaled`, at most 4 GB), so changing the HDR settings,
+  or switching HDR off, redoes a photo without running the AI model again.
+  Preferences → Performance → Storage shows the cache size and clears it.
+- `{hdr}` filename-template field.
+- **HDR output** (Export → Range: HDR, `--dynamic-range hdr`): true HDR files,
+  SMPTE ST 2084 (PQ) in Rec. 2020 or Display P3, written as 16-bit PNG with a
+  `cICP` chunk (lossless, alpha, measured `cLLi`) or 10-bit 4:4:4 AVIF with an
+  `nclx` colour box (through ffmpeg/libaom-av1). Every file is parsed back,
+  and cross-checked with ffprobe when installed, before the job succeeds. A
+  failed check deletes the file; there is no silent SDR fallback. Adjustable
+  peak luminance (BT.2390 roll-off above it), SDR white level (BT.2408 203
+  cd/m² by default) and optional highlight expansion. SDR sources are
+  *converted* (ICC-aware, wide gamut kept, labelled as a conversion). The
+  `{hdr}` tag gains `pq<peak>…`, e.g. `photo_4x_pq1000.png`.
+- HDR sources: PQ/HLG PNG and AVIF, OpenEXR and Radiance `.hdr` are
+  recognised by their colour description and decoded with ffmpeg. With HDR
+  output they keep their range through the AI model via an invertible 16-bit
+  proxy. With SDR output they are tone-mapped (BT.2390) with a warning.
+  Previews and thumbnails show a labelled SDR rendition.
+- HLG output (`--hdr-transfer hlg`, Export → transfer: HLG): BT.2100 HLG for
+  the 1000 cd/m² reference display, in PNG (`cICP` 9/18/0/1) and AVIF.
+  Out-of-range saturated colours are desaturated (luminance kept) instead of
+  clipped.
+- Ultra HDR gain-map JPEG output and input (`--hdr-format jpeg`): an sRGB SDR
+  JPEG that every viewer shows, plus a per-channel gain map (Adobe `hdrgm` XMP,
+  MPF), validated after writing.
+- HDR AVIF keeps transparency (a 10-bit alpha item). AVIF exports are decoded
+  back and compared with the encoded planes before they count as written.
+- OpenEXR `chromaticities` are honoured (any primaries, white point adapted to
+  D65).
+- `pixelift --inspect-hdr FILE` prints an HDR file's colour description (PNG,
+  AVIF, gain-map JPEG).
+- An opt-in headless Chrome test checks that a real viewer honours the written
+  colour descriptions (`PIXELIFT_TEST_CHROME=1`).
+- The upscaler accepts and returns 16-bit images.
+- AVIF input.
+
+### Changed
+
+- The `.deb` recommends `ffmpeg`. The desktop file lists AVIF, OpenEXR and
+  Radiance HDR.
+
 ## [1.8.0] - 2026-10-11
 
 ### Added

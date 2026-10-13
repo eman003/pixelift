@@ -127,6 +127,18 @@ def test_alpha_flattened_for_jpeg(image_factory, upscaler, tiny_specs):
         assert out.mode == "RGB" and out.format == "JPEG"
 
 
+@pytest.mark.parametrize(("mode", "key"), [("RGB", (0, 0, 0)), ("L", 0)])
+def test_colour_key_transparency_becomes_alpha(tmp_path, mode, key):
+    img = Image.new(mode, (8, 8), 200 if mode == "L" else (200, 10, 10))
+    img.putpixel((0, 0), key)
+    path = tmp_path / "key.png"
+    img.save(path, transparency=key)
+    loaded = iu.load_image(path)
+    assert loaded.alpha is not None
+    assert loaded.alpha[0, 0] == 0 and loaded.alpha[1, 1] == 255
+    assert loaded.grayscale == (mode == "L")
+
+
 def test_opaque_alpha_is_dropped(image_factory):
     path = image_factory("opaque.png")
     Image.open(path).convert("RGBA").save(path)
@@ -386,3 +398,21 @@ def test_strip_location_changes_the_output_tag():
     from pixelift.core.image_processor import output_tag
 
     assert output_tag(ProcessingOptions()) != output_tag(ProcessingOptions(strip_location=True))
+
+
+def test_exif_resolution_scaled_like_the_dpi(tmp_path):
+    from pixelift.utils.metadata import extract_metadata, save_kwargs
+
+    exif = Image.Exif()
+    exif[0x011A], exif[0x011B], exif[0x0128], exif[0x010F] = 72, 96, 2, "Cam"
+    src = tmp_path / "in.jpg"
+    Image.new("RGB", (8, 8)).save(src, exif=exif.tobytes(), dpi=(72, 96))
+    with Image.open(src) as img:
+        meta = extract_metadata(img)
+    out = tmp_path / "out.jpg"
+    Image.new("RGB", (32, 32)).save(out, **save_kwargs("JPEG", meta, 90, 4, "RGB"))
+    with Image.open(out) as img:
+        written = img.getexif()
+        assert tuple(round(v) for v in img.info["dpi"]) == (288, 384)
+    assert (float(written[0x011A]), float(written[0x011B])) == (288, 384)
+    assert written[0x010F] == "Cam" and meta.scaled_exif(1) == meta.exif

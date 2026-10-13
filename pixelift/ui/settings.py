@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING
 from gi.repository import Adw, Gio, GLib, GObject, Gtk
 
 from pixelift.core import device_manager as dm
+from pixelift.core import upscale_cache
+from pixelift.core.image_processor import hdr_tag, output_extension
 from pixelift.models import KIND_LABELS, UPSCALE, all_families
 from pixelift.ui.widgets.model_row import ModelRow
 from pixelift.utils import system
-from pixelift.utils.image_utils import check_template, render_filename
+from pixelift.utils.image_utils import check_template, human_size, render_filename
 
 if TYPE_CHECKING:
     from pixelift.ui.application import UpscalerApplication
@@ -245,7 +247,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             row.add_css_class("error")
             self.template_hint.set_title(
                 "Unknown field — use {name} {scale} {model} {width} {height} {ext} {lighting} "
-                "{look}"
+                "{look} {hdr}"
             )
             return
         row.remove_css_class("error")
@@ -253,7 +255,9 @@ class PreferencesDialog(Adw.PreferencesDialog):
         self._update_template_hint()
 
     def _update_template_hint(self) -> None:
-        ext = {"png": ".png", "jpeg": ".jpg", "webp": ".webp"}[self.settings.output_format]
+        options = self.settings.processing_options()
+        options.restoration = None  # the template names upscaled results
+        ext = output_extension(options)
         example = render_filename(
             self.settings.filename_template,
             Path("photo.jpg"),
@@ -264,6 +268,7 @@ class PreferencesDialog(Adw.PreferencesDialog):
             ext,
             self.settings.lighting().tag(),
             self.settings.camera_look_settings().tag(),
+            hdr_tag(options),
         )
         self.template_hint.set_title(f"Example: photo.jpg → {example}")
 
@@ -305,6 +310,18 @@ class PreferencesDialog(Adw.PreferencesDialog):
         threads.connect("notify::value", lambda r, _p: self._set("cpu_threads", int(r.get_value())))
         group.add(threads)
 
+        storage = Adw.PreferencesGroup(title="Storage")
+        page.add(storage)
+        self.cache_row = Adw.ActionRow(title="Upscale cache", use_markup=False)
+        self.cache_clear = Gtk.Button(label="Clear", valign=Gtk.Align.CENTER)
+        self.cache_clear.update_property(
+            [Gtk.AccessibleProperty.LABEL], ["Clear the upscale cache"]
+        )
+        self.cache_clear.connect("clicked", lambda _b: self._clear_cache())
+        self.cache_row.add_suffix(self.cache_clear)
+        storage.add(self.cache_row)
+        self._update_cache_row()
+
         look = Adw.PreferencesGroup(title="Appearance")
         page.add(look)
         theme = _combo("Style", [label for label, _ in THEME_LABELS])
@@ -314,6 +331,19 @@ class PreferencesDialog(Adw.PreferencesDialog):
             "notify::selected", lambda r, _p: self._set("theme", tvalues[r.get_selected()])
         )
         look.add(theme)
+
+    def _update_cache_row(self) -> None:
+        used = upscale_cache.total_bytes()
+        size = human_size(used) if used else "Empty"
+        self.cache_row.set_subtitle(
+            f"{size} · Upscaled photos kept while HDR is on, so changing the HDR "
+            "settings does not run the AI model again"
+        )
+        self.cache_clear.set_sensitive(used > 0)
+
+    def _clear_cache(self) -> None:
+        upscale_cache.clear()
+        self._update_cache_row()
 
     # --- models ------------------------------------------------------------
     def _build_models(self) -> None:

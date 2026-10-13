@@ -21,7 +21,7 @@ Section: graphics
 Priority: optional
 Architecture: amd64
 Depends: python3 (>= $PYVER), python3 (<< $PYNEXT), python3-gi (>= 3.42), gir1.2-gtk-4.0, gir1.2-adw-1 (>= 1.5)
-Recommends: python3-pip
+Recommends: python3-pip, ffmpeg
 Installed-Size: $SIZE_KB
 Maintainer: Pixelift contributors <noreply@example.com>
 Homepage: https://github.com/eman003/pixelift

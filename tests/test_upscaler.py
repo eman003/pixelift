@@ -297,7 +297,7 @@ def test_tile_size_follows_the_device_each_attempt_runs_on(manager, monkeypatch)
     up.device = fake_gpu
     sized_for: list[str] = []
 
-    def choose(spec, height, width, device):
+    def choose(spec, height, width, device, wide=False):
         sized_for.append(device.id)
         return 64
 

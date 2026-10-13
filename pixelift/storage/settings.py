@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import logging
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from pixelift.core import camera_looks as cl
-from pixelift.core import lighting, presets
+from pixelift.core import hdr, lighting, presets
+from pixelift.core.hdr_output import pipeline as hdr_output
 from pixelift.core.image_processor import ProcessingOptions
 from pixelift.core.restoration import settings as rs
 from pixelift.storage import paths
@@ -63,6 +65,23 @@ class Settings:
     camera_look_grain: str = cl.GRAIN_AUTO
     camera_look_favorites: list[str] = field(default_factory=list)
     camera_look_saved: dict[str, dict[str, int]] = field(default_factory=dict)
+    # HDR enhancement (after upscaling, Upscale mode). The hdr_<name> values
+    # are the Advanced adjustments, -100..100 around the profile.
+    hdr_enabled: bool = False
+    hdr_profile: str = hdr.DEFAULT_PROFILE
+    hdr_intensity: int = hdr.get_profile(hdr.DEFAULT_PROFILE).default_intensity
+    hdr_shadows: int = 0
+    hdr_highlights: int = 0
+    hdr_local_contrast: int = 0
+    hdr_saturation: int = 0
+    # Output dynamic range: "sdr" (the format above) or "hdr" (its own format).
+    output_range: str = "sdr"
+    hdr_transfer: str = "pq"
+    hdr_output_format: str = "png"
+    hdr_output_primaries: str = "bt2020"
+    hdr_peak_nits: int = 1000
+    hdr_sdr_white: int = 203
+    hdr_expand_highlights: bool = False
     # The last preset chosen ("" = none); its values live in the fields it sets.
     preset: str = ""
     look_exposure: int = 0
@@ -142,6 +161,27 @@ class Settings:
         for name in lighting.ADJUSTMENT_NAMES:
             key = f"lighting_{name}"
             setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
+        if not hdr.has_profile(self.hdr_profile):
+            self.hdr_profile = default.hdr_profile
+        self.hdr_intensity = min(100, max(0, int(self.hdr_intensity)))
+        for name in hdr.ADVANCED_NAMES:
+            key = f"hdr_{name}"
+            setattr(self, key, min(100, max(-100, int(getattr(self, key)))))
+        if self.output_range == "pq":  # early development builds
+            self.output_range = "hdr"
+        if self.output_range not in hdr_output.MODES:
+            self.output_range = default.output_range
+        if self.hdr_transfer not in hdr_output.TRANSFERS:
+            self.hdr_transfer = default.hdr_transfer
+        if self.hdr_output_format not in hdr_output.FORMATS:
+            self.hdr_output_format = default.hdr_output_format
+        if self.hdr_output_primaries not in hdr_output.OUTPUT_PRIMARIES:
+            self.hdr_output_primaries = default.hdr_output_primaries
+        low, high = hdr_output.PEAK_RANGE
+        self.hdr_peak_nits = min(high, max(low, int(self.hdr_peak_nits)))
+        low, high = hdr_output.SDR_WHITE_RANGE
+        self.hdr_sdr_white = min(high, max(low, int(self.hdr_sdr_white)))
+        self.hdr_expand_highlights = bool(self.hdr_expand_highlights)
         self._normalise_restoration(default)
         self._normalise_camera_look(default)
         if not presets.has_preset(self.preset):
@@ -254,6 +294,25 @@ class Settings:
         )
         return lighting.LightingSettings(self.lighting_profile, self.lighting_intensity, custom)
 
+    def hdr(self) -> hdr.HdrSettings:
+        return hdr.HdrSettings(
+            self.hdr_enabled,
+            self.hdr_profile,
+            self.hdr_intensity,
+            **{name: getattr(self, f"hdr_{name}") for name in hdr.ADVANCED_NAMES},
+        )
+
+    def hdr_output(self) -> hdr_output.HdrOutputSettings:
+        return hdr_output.HdrOutputSettings(
+            mode=self.output_range,
+            format=self.hdr_output_format,
+            primaries=self.hdr_output_primaries,
+            peak_nits=self.hdr_peak_nits,
+            sdr_white=self.hdr_sdr_white,
+            expand_highlights=self.hdr_expand_highlights,
+            transfer=self.hdr_transfer,
+        )
+
     def processing_options(self) -> ProcessingOptions:
         return ProcessingOptions(
             scale=self.scale,
@@ -267,6 +326,8 @@ class Settings:
             strip_location=self.strip_location,
             lighting=self.lighting(),
             camera_look=self.camera_look_settings(),
+            hdr=self.hdr(),
+            hdr_output=self.hdr_output(),
             restoration=self.restoration() if self.mode == "restore" else None,
         )
 
@@ -309,8 +370,13 @@ def save_settings(settings: Settings, path: Path | None = None) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".settings-", dir=path.parent)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(dataclasses.asdict(settings), fh, indent=2, sort_keys=True)
-        os.replace(tmp, path)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(dataclasses.asdict(settings), fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)  # e.g. disk full: leave no .settings-* behind
+            raise
     except OSError:
         log.exception("Could not save settings to %s", path)

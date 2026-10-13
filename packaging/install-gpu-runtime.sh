@@ -9,6 +9,10 @@
 #   install-gpu-runtime.sh remove    # go back to the bundled CPU build
 set -eu
 VARIANT="${1:-cu126}"
+# Same release as the bundled CPU build (packaging/requirements-cp312.txt), so
+# it matches the locked packages it is loaded alongside. The GPU indexes publish
+# different wheels per variant, so only the version (not the hash) is pinned.
+TORCH_VERSION="2.14.1"
 TARGET="${XDG_DATA_HOME:-$HOME/.local/share}/pixelift/runtime"
 if [ "$VARIANT" = "remove" ]; then
     rm -rf "$TARGET"; echo "Removed $TARGET"; exit 0
@@ -18,7 +22,7 @@ if ! python3 -m pip --version >/dev/null 2>&1; then
 fi
 echo "Downloading PyTorch ($VARIANT) — this is a large download (2–4 GB)…"
 rm -rf "$TARGET.new"
-python3 -m pip install --no-cache-dir --target "$TARGET.new" torch \
+python3 -m pip install --no-cache-dir --target "$TARGET.new" "torch==$TORCH_VERSION" \
     --index-url "https://download.pytorch.org/whl/$VARIANT"
 rm -rf "$TARGET"
 mv "$TARGET.new" "$TARGET"

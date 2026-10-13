@@ -68,3 +68,20 @@ def test_preset_choice_persists_and_unknown_ids_are_dropped(tmp_path):
     assert loaded.preset == "film" and presets.label(loaded) == "Film"
     loaded.preset = "ultra-hd-magic"
     assert loaded.normalise().preset == ""
+
+
+def test_presets_account_for_hdr_enhancement():
+    settings = Settings()
+    settings.hdr_enabled = True
+    assert presets.label(settings) == "Custom"  # HDR Enhancement is not "Original"
+    presets.apply(settings, presets.ORIGINAL)
+    assert not settings.hdr_enabled
+    assert presets.label(settings) == "Original"
+    presets.apply(settings, "natural")
+    settings.hdr_enabled = True
+    assert presets.label(settings) == "Natural · Modified"
+    # Restore Photos does not use HDR Enhancement: presets leave it alone.
+    settings.mode = "restore"
+    presets.apply(settings, "natural")
+    assert settings.hdr_enabled
+    assert presets.label(settings) == "Natural"

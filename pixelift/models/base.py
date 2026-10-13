@@ -66,6 +66,9 @@ class ModelSpec:
     # Extra harmless globals the checkpoint pickles (e.g. ``slice``), allowed
     # while still loading with ``weights_only=True``.
     safe_globals: tuple[Any, ...] = ()
+    # Always run in float32: the network overflows float16 (GFPGAN's StyleGAN2
+    # demodulation sums reach ~1.5e6, past float16's 65504, and zero whole layers).
+    full_precision: bool = False
 
     @property
     def size_mb(self) -> float:

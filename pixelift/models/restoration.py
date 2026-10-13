@@ -63,6 +63,7 @@ GFPGAN_V14 = register(
         tags=("restoration",),
         kind=FACE_RESTORE,
         version="v1.4",
+        full_precision=True,
     )
 )
 

@@ -235,7 +235,7 @@ class TorchUpscaler(Upscaler):
         """
         import torch
 
-        half = self.half and not full_precision
+        half = self.half and not full_precision and not spec.full_precision
         key = spec.id if half or not self.half else f"{spec.id}#float32"
         with self._lock:
             net = self._nets.get(key)

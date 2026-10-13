@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import itertools
 
 import numpy as np
@@ -60,6 +61,22 @@ def test_model_loaded_once_and_reused(upscaler, monkeypatch):
     upscaler.release()
     upscaler.upscale(rgb(8, 8), 4, "test-x4")
     assert len(calls) == 2
+
+
+def test_full_precision_spec_stays_float32_on_half_devices(upscaler, tiny_specs, monkeypatch):
+    monkeypatch.setattr(TorchUpscaler, "half", property(lambda self: True))
+    spec = tiny_specs["x4"]
+    assert next(upscaler.load(spec).parameters()).dtype == torch.float16
+    upscaler.release()
+    wide = dataclasses.replace(spec, full_precision=True)
+    assert next(upscaler.load(wide).parameters()).dtype == torch.float32
+
+
+def test_gfpgan_runs_in_full_precision():
+    # Its StyleGAN2 demodulation overflows float16 and zeroes whole layers.
+    from pixelift.models.restoration import GFPGAN_V14
+
+    assert GFPGAN_V14.full_precision
 
 
 def test_missing_model(manager):

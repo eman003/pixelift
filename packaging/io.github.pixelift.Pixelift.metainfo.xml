@@ -28,6 +28,15 @@
   <provides><binary>pixelift</binary></provides>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.9.0" date="2026-10-13">
+      <description>
+        <p>HDR Enhancement brings out shadows and highlights in upscaled photos, and HDR
+          output writes true HDR files: PQ or HLG PNG and AVIF, and Ultra HDR JPEG. HDR
+          photos (PQ/HLG PNG and AVIF, OpenEXR, Radiance HDR, Ultra HDR JPEG) can be
+          upscaled with their range kept. Face restoration on NVIDIA and Intel GPUs no
+          longer corrupts faces, and model downloads are hardened.</p>
+      </description>
+    </release>
     <release version="1.8.0" date="2026-10-11">
       <description>
         <p>A new Remove location option leaves GPS coordinates out of copied metadata.

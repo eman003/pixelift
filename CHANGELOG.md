@@ -4,7 +4,7 @@ All notable changes to Pixelift are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.9.0] - 2026-10-13
 
 ### Added
 
@@ -56,6 +56,43 @@ All notable changes to Pixelift are documented here. The format follows
 
 - The `.deb` recommends `ffmpeg`. The desktop file lists AVIF, OpenEXR and
   Radiance HDR.
+- Choosing a preset turns HDR Enhancement off (presets don't include it);
+  with HDR Enhancement on, the Preset tab shows the settings as modified.
+- `--format` asks for that SDR file even when the app was last left on HDR
+  output; combining it with `--dynamic-range hdr` is an error.
+- The command line exits with status 1 when an input is missing or not a
+  supported image, and says so, instead of only processing the rest.
+- `--tile-size` must be 0 (automatic) or at least 64, and `--threads` 0 or
+  more.
+
+### Fixed
+
+- Face restoration (GFPGAN) runs in full precision on NVIDIA and Intel GPUs:
+  in half precision some of its layers overflowed and restored faces came
+  out corrupted.
+- PNG images with a transparent colour key keep that transparency in the
+  result instead of getting a solid background.
+- The EXIF print resolution of a result is scaled like its DPI, so apps that
+  read EXIF show the right print size.
+- Large faces are pasted back in bands instead of needing gigabytes of
+  memory.
+- Startup no longer waits for an ffmpeg check, and dropping a big folder no
+  longer freezes the window while it is scanned.
+- The Peak and SDR-white controls save once you stop changing them, instead
+  of on every step.
+- Removing a photo clears its HDR warning from the Export panel.
+- Results inside an `-o` folder that lies within a scanned folder are not
+  upscaled again on the next run.
+- A failed settings save no longer leaves temporary files behind.
+- `.hdr` files offer "Open with Pixelift" (`image/x-hdr`).
+
+### Security
+
+- Model downloads stop once they grow past the expected size and never
+  follow a redirect to plain http; manual installs check the exact bytes
+  they copy.
+- The GPU runtime installer installs the same pinned PyTorch version as the
+  bundled packages.
 
 ## [1.8.0] - 2026-10-11
 

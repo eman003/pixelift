@@ -172,7 +172,7 @@ class TorchUpscaler(Upscaler):
             del checkpoint
             net.eval().requires_grad_(False)
             net = net.to(dm.to_torch(self.device))
-            if self.half:
+            if self.half and not spec.full_precision:
                 net = net.half()
             self._nets[spec.id] = net
             return net
